@@ -570,6 +570,11 @@ def 依据全是我观察到的会报一句():
     assert code == 0, out
     code, out = run(d, "check.py")
     assert "没有一句他自己的话" in out, f"只有观察当依据，该报一句：\n{out}"
+    # 退役之后就不该再唠叨：它已经不是一条在役判断了
+    code, out = run(d, "commit.py", "--retire", "c-001", "--reason", "只有观察撑着")
+    assert code == 0, out
+    code, out = run(d, "check.py")
+    assert "没有一句他自己的话" not in out, f"退役的判断不该再报：\n{out}"
 
 
 @case
@@ -590,6 +595,27 @@ def 观察配上原话就不再报():
     assert code == 0, out
     code, out = run(d, "check.py")
     assert "没有一句他自己的话" not in out, f"有他的原话就不该报：\n{out}"
+
+
+@case
+def 硬规则从判断渲染不存副本():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    put(d, "c.json", [{"topic": "interface", "type": "disposition",
+                       "text": "先给结论再给理由",
+                       "context": "他说每天凌晨四点到店里，先发面再烤第一批——连回答问题也一样，先说结论。",
+                       "source": "user", "confidence": "confirmed", "basis": ["f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    ctx = (d / "me" / "CONTEXT.md").read_text(encoding="utf-8")
+    assert "## 硬规则" in ctx, ctx[:300]
+    assert "- 先给结论再给理由" in ctx, f"interface 判断必须出现在硬规则里：\n{ctx[:600]}"
+    # 退役之后，硬规则里也要跟着消失 —— 这是"不存副本"的意义
+    cid = [c["id"] for c in jsonl(d, "claims.jsonl") if c["text"] == "先给结论再给理由"][0]
+    code, out = run(d, "commit.py", "--retire", cid, "--reason", "不成立了")
+    assert code == 0, out
+    ctx = (d / "me" / "CONTEXT.md").read_text(encoding="utf-8")
+    assert "- 先给结论再给理由" not in ctx, f"退役后硬规则不该还在下指令：\n{ctx[:600]}"
 
 
 # ---------------------------------------------------------------- 性能

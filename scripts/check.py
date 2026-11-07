@@ -192,7 +192,8 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
         # 观察可以是证据，不能是唯一的证据。
         # 一格"我看到的"如果单独撑起一条判断，就成了用我的眼睛代替他的嘴——
         # 历史上那 14 条就是这么出事的：没有原话，就往 AI观察 里倒结论。
-        if live_basis and all(fid[b].get("source") == "ai" for b in live_basis):
+        if (c.get("status") == "active" and live_basis
+                and all(fid[b].get("source") == "ai" for b in live_basis)):
             warn(f"claim {i} 的依据全是我观察到的，没有一句他自己的话"
                  f"（{'、'.join(live_basis[:3])}）—— 补一条他的原话，或者这条还不该写成判断")
 

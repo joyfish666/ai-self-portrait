@@ -248,11 +248,15 @@ def render_context(claims, tensions, today, facts=None):
     overdue = sum(1 for c in judged if c.get("review_after") and c["review_after"] < today)
 
     head = ["# 关于我（给 AI 的上下文）", ""]
+    # 「硬规则」里"关于他"的部分从 interface 域的判断现算——代码里不再存副本。
+    # 以前 c-034/c-035/c-036 被抄成字符串写死在这里：c-036 退休之后，
+    # 副本还在 CONTEXT 里对 AI 下一条库已经不认的指令。一处真相只能有一个。
+    rules = [c["text"] for c in sorted(judged, key=sort_key)
+             if c["topic"] == "interface" and c["type"] in JUDGED]
+    head += ["## 硬规则"]
+    head += [f"- {r}" for r in rules]
+    # 下面两条是给 AI 的通用要求，不是关于他，所以留在代码里
     head += [
-        "## 硬规则",
-        "- 不要用称呼，直接说“你”。",
-        "- 问偏好给选项；问情况问具体场景，不要问“你是什么样的人”。",
-        "- 任务要切小：大任务会卡住，小任务能做完。",
         "- 不要把推断当事实；不确定就说不确定。",
         "- 超过 30 天的信息后面会带 ·3月前 这样的年龄；用它回答前先说一句。",
         "",
