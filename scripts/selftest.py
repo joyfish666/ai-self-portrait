@@ -464,6 +464,35 @@ def 依据全来自干活现场会问一句():
     assert "还有别的场合" in out, out
 
 
+# ---------------------------------------------------------------- 域
+
+@case
+def 采集约定进CONTEXT不进画像():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    put(d, "c.json", [{"topic": "interface", "type": "disposition",
+                       "text": "别问家里的事",
+                       "context": "他说每天凌晨四点到店里，先发面再烤第一批——家里的事不想聊。",
+                       "source": "ai", "confidence": "inferred", "basis": ["f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    portrait = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    context = (d / "me" / "CONTEXT.md").read_text(encoding="utf-8")
+    assert "别问家里的事" not in portrait, "interface 不该进画像正文"
+    assert "别问家里的事" in context, "interface 必须进 CONTEXT，否则下次接着建的人不知道"
+    # 也不能算进完整度
+    assert "不计入完整度" in portrait, portrait[:400]
+
+
+@case
+def 新域自动进完整度分母():
+    d = sandbox()
+    code, out = run(d, "build.py")
+    assert code == 0, out
+    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    assert "覆盖 0/9" in p, f"分母应当跟着 DOMAINS 走，不该写死：\n{p[:300]}"
+
+
 # ---------------------------------------------------------------- 性能
 
 @case

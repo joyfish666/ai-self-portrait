@@ -712,8 +712,8 @@ def main():
     else:
         print("\n⚠️  本轮没交 --said：无法核对「我说的话是不是都记了」")
 
-    active_doms = [d for d in ("work", "goals", "values", "emotion", "identity",
-                               "health", "relations", "leisure", "interface")
+    active_doms = [d for d in ("work", "methods", "goals", "values", "emotion",
+                               "identity", "health", "relations", "leisure", "interface")
                    if stat["judged"].get(d) or stat["basis"].get(d) or stat["facts"].get(d)]
     if active_doms:
         parts = []

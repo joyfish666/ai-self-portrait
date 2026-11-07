@@ -25,10 +25,11 @@ ME = ROOT / "me"
 sys.path.insert(0, str(ROOT / "scripts"))
 from store import dump_jsonl, load, today_iso  # noqa: E402
 
-DOMAINS = ["identity", "work", "goals", "values", "emotion",
+DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
            "health", "relations", "leisure"]
-NAME = {"identity": "身份", "work": "职业", "goals": "目标", "values": "价值",
-        "emotion": "情绪", "health": "身体", "relations": "关系", "leisure": "兴趣"}
+NAME = {"identity": "身份", "work": "职业", "methods": "方法", "goals": "目标",
+        "values": "价值", "emotion": "情绪", "health": "身体",
+        "relations": "关系", "leisure": "兴趣"}
 JUDGED = ("disposition", "inference")
 
 

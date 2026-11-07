@@ -49,7 +49,7 @@ python scripts/commit.py --defer health --reason "今天不想说" --days 30
 2. 按 `PROTOCOL.md` 的域顺序开始（先 identity，再 goals/values）
 3. **每轮 4–5 问**，问完立刻 `commit.py` 落盘
 4. 每 3 轮跑一次 `check.py`
-5. 覆盖完 8 个域 → `build.py` → 展示 `me/PORTRAIT.md`
+5. 覆盖完 9 个域 → `build.py` → 展示 `me/PORTRAIT.md`
 6. 请他逐条否决
 
 ## 一轮怎么干（照这个顺序，别改）
@@ -145,7 +145,7 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
 两条一起用，是同一个错误的两个方向：
 
 - **域**：按"这属于他哪一块"分，**不按在哪儿看到的**。`ai_usage` 和 `supplier_usage` 是同一种错
-- **判断**：说到证据能覆盖的高度。**干活现场的观察，只能支撑 `work` / `interface` 层面的判断**
+- **判断**：说到证据能覆盖的高度。**干活现场的观察，只能支撑 `work` / `methods` / `interface` 层面的判断**
 
 最常犯的是第二条：从"他要 AI 表态"推成"他要人承担判断"。**对 AI 的态度不等于对人的态度。**
 想把判断升到"他这个人怎样"，得有别场合的证据，或者他明确说过。
@@ -236,7 +236,7 @@ python scripts/commit.py --retopic c-038:work,c-060:work,c-068:work --reason "�
 
 ## 完成标准
 
-- 8 个域各 ≥2 条**判断**，总计 ≥25 条判断
+- 9 个域各 ≥2 条**判断**，总计 ≥25 条判断
 - `check.py` 通过
 - 用户说 `PORTRAIT.md` "像我"
 

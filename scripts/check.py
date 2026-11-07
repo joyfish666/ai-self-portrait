@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from store import (ISO_RE, age_days, covered_by, has_fragment,  # noqa: E402
                    load, overlap, to_date)
 
-DOMAINS = ["identity", "work", "goals", "values", "emotion",
+DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
            "health", "relations", "leisure"]
 DEBT_RETRY, DEBT_RING, DEBT_CROWD = 20, 30, 30   # 天：开始重试 / 点名 / 攒太多
 JUDGED = ("disposition", "inference")

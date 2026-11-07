@@ -20,12 +20,13 @@ ME = ROOT / "me"
 sys.path.insert(0, str(ROOT / "scripts"))
 from store import age_days, age_text  # noqa: E402
 
-DOMAINS = ["identity", "work", "goals", "values", "emotion",
+DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
            "health", "relations", "leisure"]
 TOPIC_ORDER = ["interface"] + DOMAINS + ["misc"]
 TOPIC_NAME = {
     "interface": "怎么跟我协作（接口）",
-    "identity": "身份与经历", "work": "职业与能力", "goals": "目标与钱",
+    "identity": "身份与经历", "work": "职业与能力", "methods": "做事方法",
+    "goals": "目标与钱",
     "values": "价值与雷区", "emotion": "情绪与压力", "health": "身体与精力",
     "relations": "重要他人", "leisure": "兴趣与消费", "misc": "其他",
 }
@@ -128,11 +129,14 @@ def render_portrait(claims, tensions, today, sess=None, topics=None):
     states = [c for c in judged if c.get("type") == "state"]
     level, cnt = compute_level(judged)
     overdue = sum(1 for c in judged if c.get("review_after") and c["review_after"] < today)
+    # interface 不进画像正文：它讲的是"这份画像怎么建"，不是"他是什么样的人"。
+    # 只进 CONTEXT.md——下次接着建的人要读它，人在画像里不该看到说明书。
+    body = [c for c in judged if c.get("topic") != "interface"]
 
     rnd = f"第 {sess.get('round')} 轮 · " if (sess or {}).get("round") else ""
     L = ["# 我的自画像", ""]
     L.append(f"> {rnd}{len(disp)} 条判断 · {len(states)} 条状态 · {len(consts)} 条背景 · "
-             f"完整度 {level}（覆盖 {sum(1 for d in DOMAINS if cnt[d])}/8） · "
+             f"完整度 {level}（覆盖 {sum(1 for d in DOMAINS if cnt[d])}/{len(DOMAINS)}） · "
              f"{len([t for t in tensions if t.get('status')=='open'])} 条未解张力 · "
              f"{overdue} 条待复核")
     L.append("")
@@ -158,7 +162,8 @@ def render_portrait(claims, tensions, today, sess=None, topics=None):
     iface = [c for c in active if c["topic"] == "interface"]
     if iface:
         ni = sum(1 for c in iface if c.get("type") in JUDGED)
-        L += [f"接口层另有 {len(iface)} 条（{ni} 条判断，不计入完整度）。", ""]
+        L += [f"采集约定另有 {len(iface)} 条（{ni} 条判断，不计入完整度，"
+              f"不进本画像，见 `CONTEXT.md`）。", ""]
     if topics:
         bits = []
         for t in topics:
@@ -170,7 +175,9 @@ def render_portrait(claims, tensions, today, sess=None, topics=None):
         L += ["> " + " ｜ ".join(bits), ""]
 
     cur = None
-    for c in judged:
+    # interface 不进画像正文：它讲的是"这份画像怎么建"，不是"他是什么样的人"。
+    # 它只进 CONTEXT.md（AI 下次接着建的时候要读），人在画像里不该看到说明书。
+    for c in body:
         if c["topic"] != cur:
             if cur is not None:
                 L += ["", "---", ""]
@@ -204,7 +211,7 @@ def render_portrait(claims, tensions, today, sess=None, topics=None):
         L.append("> 完整原因见 REVISIONS.md")
         L.append("")
 
-    pend = [c for c in judged if c.get("confidence") in ("inferred", "unconfirmed", "unsure")
+    pend = [c for c in body if c.get("confidence") in ("inferred", "unconfirmed", "unsure")
             or c.get("ambiguous")]
     if pend:
         L += ["## 待确认 / 有歧义", ""]

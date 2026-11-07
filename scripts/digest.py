@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import check as check_mod  # noqa: E402
 from store import load  # noqa: E402
 
-DOMAINS = ["identity", "work", "goals", "values", "emotion",
+DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
            "health", "relations", "leisure"]
 JUDGED = ("disposition", "inference")
 
