@@ -1,0 +1,5 @@
+# 统一按 LF 存储，避免 jsonl 被 CRLF 污染
+* text=auto eol=lf
+*.jsonl text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf

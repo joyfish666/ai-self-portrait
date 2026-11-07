@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""自测：把 SPEC §8 的验收变成能跑的断言。
+
+用法
+    python scripts/selftest.py          # 跑一遍，全绿返回 0
+    python scripts/selftest.py --keep   # 保留临时目录，方便看哪里坏了
+
+每个 case 在**临时目录**里从零建一个仓（只拷 scripts/ 和 template/），
+用 scripts/_fixtures.py 里的**虚构数据**跑，不碰 me/，也不需要任何个人数据。
+"""
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import date, timedelta
+from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import _fixtures as fx  # noqa: E402
+
+TODAY = date.today().isoformat()
+TMP = []
+CASES = []
+CALLS = [0]
+
+
+def case(fn):
+    CASES.append(fn)
+    return fn
+
+
+def days_ago(n):
+    return (date.today() - timedelta(days=n)).isoformat()
+
+
+def sandbox():
+    d = Path(tempfile.mkdtemp(prefix="sp_st_"))
+    TMP.append(d)
+    shutil.copytree(ROOT / "scripts", d / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "template", d / "template")
+    code, out = run(d, "init.py")
+    assert code == 0, f"init 失败：\n{out}"
+    return d
+
+
+def run(d, script, *args):
+    CALLS[0] += 1
+    r = subprocess.run([sys.executable, str(Path(d) / "scripts" / script), *args],
+                       cwd=str(d), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def put(d, name, obj):
+    (Path(d) / name).write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+
+
+def jsonl(d, name):
+    p = Path(d) / "me" / name
+    if not p.exists():
+        return []
+    return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+def seed(d, facts=None, claims=None):
+    """用一轮 commit 把基础数据灌进去。"""
+    put(d, "f.json", facts if facts is not None else fx.base_facts(TODAY))
+    args = ["commit.py", "--facts", "f.json"]
+    if claims is not None:
+        put(d, "c.json", claims)
+        args += ["--claims", "c.json"]
+    code, out = run(d, *args)
+    assert code == 0, f"seed 失败：\n{out}"
+    return out
+
+
+# ---------------------------------------------------------------- 承诺
+
+@case
+def g3_空仓也能出画像():
+    d = sandbox()
+    code, out = run(d, "build.py")
+    assert code == 0, out
+    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    assert len(p.splitlines()) >= 10, f"空画像太短：{p!r}"
+    code, out = run(d, "check.py")
+    assert code == 0, out
+
+
+@case
+def g1_依据悬空进草稿():
+    d = sandbox()
+    seed(d, claims=[])
+    put(d, "bad.json", [{"topic": "work", "type": "state",
+                         "text": "占位判断",
+                         "context": "他说每天凌晨四点到店里，先发面再烤第一批，这条的依据是编的。",
+                         "source": "ai", "confidence": "inferred", "basis": ["f-9999"]}])
+    code, out = run(d, "commit.py", "--claims", "bad.json")
+    assert code == 0, out
+    assert "进草稿" in out, out
+    assert jsonl(d, "claims.jsonl") == [], "悬空依据不该进 claims"
+    assert len(jsonl(d, "drafts.jsonl")) == 1, "应该有一条草稿"
+
+
+@case
+def g1_缺_asked_进草稿():
+    d = sandbox()
+    put(d, "f.json", [{"date": TODAY, "kind": "自述", "text": "这句没写当时问的是什么。",
+                       "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json")
+    assert code == 0, out
+    assert "缺 asked" in out, out
+    assert jsonl(d, "facts.jsonl") == []
+
+
+@case
+def g2_手改视图会被抓():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    code, _ = run(d, "build.py")
+    assert code == 0
+    code, out = run(d, "check.py")
+    assert code == 0, out
+    p = d / "me" / "PORTRAIT.md"
+    p.write_text(p.read_text(encoding="utf-8") + "\n手改一行\n", encoding="utf-8")
+    code, out = run(d, "check.py")
+    assert code == 1 and "被手改" in out, out
+    run(d, "build.py")
+    code, out = run(d, "check.py")
+    assert code == 0, out
+
+
+@case
+def g6_第61条整批拒绝():
+    d = sandbox()
+    seed(d, facts=fx.base_facts(TODAY)[:1], claims=[])
+    put(d, "bulk.json", fx.bulk_claims(60))
+    code, out = run(d, "commit.py", "--claims", "bulk.json")
+    assert code == 0, out
+    assert len(jsonl(d, "claims.jsonl")) == 60
+    put(d, "one.json", fx.bulk_claims(1, start=60))
+    code, out = run(d, "commit.py", "--claims", "one.json")
+    assert code == 1 and "超过上限" in out, out
+    assert len(jsonl(d, "claims.jsonl")) == 60, "拒绝时不该写入任何东西"
+
+
+@case
+def g4_过期会标出等待符():
+    d = sandbox()
+    old = days_ago(400)
+    put(d, "f.json", [{"date": old, "kind": "自述", "asked": "最近在忙什么",
+                       "text": "那时候每天凌晨四点到店里，先发面再烤第一批。",
+                       "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json")
+    assert code == 0, out
+    put(d, "c.json", [{"topic": "work", "type": "disposition",
+                       "text": "靠手感判断发面",
+                       "context": "他说那时候每天凌晨四点到店里，先发面再烤第一批——发到什么时候看手感。",
+                       "source": "ai", "confidence": "inferred",
+                       "since": old, "basis": ["f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    assert "⏳" in p, "过期的判断应该带 ⏳"
+
+
+@case
+def g8_对账单与漏记():
+    d = sandbox()
+    put(d, "said.json", fx.said(3, 2))
+    put(d, "f.json", fx.base_facts(TODAY))
+    put(d, "c.json", fx.base_claims())
+    code, out = run(d, "commit.py", "--said", "said.json",
+                    "--facts", "f.json", "--claims", "c.json")
+    assert code == 0, out
+    assert "0 丢失" in out, out
+    assert "你说 5 句" in out and "2 句没落地" in out, out
+    assert len(jsonl(d, "transcript.jsonl")) == 5
+
+
+@case
+def g8_剔除悬空依据不会算成负数():
+    d = sandbox()
+    seed(d, claims=[])
+    put(d, "c.json", [{"topic": "work", "type": "state",
+                       "text": "早上四点到店",
+                       "context": "他说每天凌晨四点到店里，先发面再烤第一批，所以作息一直是早班，晚上很早就睡。",
+                       "source": "ai", "confidence": "inferred",
+                       "basis": ["f-0001", "f-9999"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    assert "0 丢失" in out, f"不该出现负数丢失：\n{out}"
+    assert "剔除了悬空依据" in out, out
+
+
+# ---------------------------------------------------------------- 收场
+
+@case
+def 退役_不进正文但留痕():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    code, out = run(d, "commit.py", "--retire", "c-001", "--reason", "以后不开面包店了")
+    assert code == 0, out
+    run(d, "build.py")
+    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    assert "已退役 1 条" in p, p
+    assert "### 干活靠手感，不看表" not in p, "退役的判断不该出现在正文"
+    r = (d / "me" / "REVISIONS.md").read_text(encoding="utf-8")
+    assert "已退役" in r and "以后不开面包店了" in r, r
+
+
+@case
+def 续期_把复核期往后推():
+    d = sandbox()
+    old = days_ago(60)
+    put(d, "f.json", [{"date": old, "kind": "自述", "asked": "周末一般怎么过",
+                       "text": "周末骑车去河边坐一下午，不做计划。",
+                       "topic": "leisure", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json")
+    assert code == 0, out
+    put(d, "c.json", [{"topic": "leisure", "type": "state",
+                       "text": "周末骑车去河边，不做计划",
+                       "context": "他说周末骑车去河边坐一下午，不做计划——休息也是随手安排的。",
+                       "source": "ai", "confidence": "inferred",
+                       "since": old, "basis": ["f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    before = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
+    code, out = run(d, "commit.py", "--renew", "c-001", "--reason", "现在还是这样")
+    assert code == 0, out
+    after = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
+    assert after["c-001"] != before["c-001"], "续期应当改变复核期"
+    assert any(c.get("renewed_reason") for c in jsonl(d, "claims.jsonl"))
+
+
+@case
+def 张力没关不能取代():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    code, out = run(d, "tension.py", "--add", "c-001", "c-002", "两条都真，但方向相反")
+    assert code == 0, out
+    merge = [{"topic": "work", "type": "disposition",
+              "text": "靠手感，也怕算账",
+              "context": "他说每天凌晨四点到店里，先发面再烤第一批，同时想自己开一家小店但没算过账。",
+              "source": "ai", "confidence": "inferred",
+              "basis": ["f-0001", "f-0002"],
+              "supersedes": ["c-001"], "reason": "合并成一句"}]
+    put(d, "m.json", merge)
+    code, out = run(d, "commit.py", "--claims", "m.json")
+    assert "先 tension.py --close" in out, out
+    code, out = run(d, "tension.py", "--close", "t-001", "--reason", "想过之后不冲突")
+    assert code == 0, out
+    code, out = run(d, "commit.py", "--claims", "m.json")
+    assert code == 0, out
+    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    assert "曾经认为" in p, p
+
+
+# ---------------------------------------------------------------- 消化债
+
+@case
+def 债_25天会给出候选():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    put(d, "old.json", [{"date": days_ago(25), "kind": "自述", "asked": "最近在忙什么",
+                         "text": "那阵子也是每天凌晨四点到店里干活。",
+                         "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "old.json")
+    assert code == 0, out
+    assert "最老 25 天" in out, out
+    assert "可能能挂上" in out, out
+
+
+@case
+def 债_35天会点名():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    put(d, "old.json", [{"date": days_ago(35), "kind": "自述", "asked": "最近在忙什么",
+                         "text": "上个月店里换了新的烤箱，温度不太稳。",
+                         "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "old.json")
+    assert code == 0, out
+    assert "🔔" in out and "三选一" in out, out
+
+
+
+@case
+def 退役后依据会掉回债里():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    code, out = run(d, "commit.py", "--retire", "c-001", "--reason", "这条不用了")
+    assert code == 0, out
+    assert "没人用了" in out, out
+    code, out = run(d, "check.py")
+    assert "未消化 1" in out, out
+
+
+@case
+def 取代会报出被丢下的依据():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    put(d, "c.json", [{"topic": "work", "type": "disposition",
+                       "text": "靠手感，也怕算账",
+                       "context": "他说想自己开一家小店，但一直没算过账——手艺是有的，卡在算账这一步，不是不会做面包。",
+                       "source": "ai", "confidence": "inferred",
+                       "basis": ["f-0002"], "supersedes": ["c-001"],
+                       "reason": "合并成一句更准的"}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    assert "没人用了" in out, out
+    assert "f-0001" in out, out
+
+
+# ---------------------------------------------------------------- 一批收场
+
+@case
+def 批量续期只出一份对账单():
+    d = sandbox()
+    seed(d)                       # 先有事实，否则判断会因依据悬空进草稿
+    old = days_ago(150)           # 复核期已经过了 60 天，续期才看得出变化
+    put(d, "c.json", [{"topic": "work", "type": "state",
+                       "text": f"占位状态第{i}条",
+                       "context": f"他说每天凌晨四点到店里，先发面再烤第一批——第{i}条占位说明。",
+                       "source": "ai", "confidence": "inferred",
+                       "since": old, "basis": ["f-0001"]} for i in range(1, 4)])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    before = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
+    assert len(before) == 3 and all(v < TODAY for v in before.values()), before
+    code, out = run(d, "commit.py", "--renew", "c-001,c-002,c-003", "--reason", "现在还是这样")
+    assert code == 0, out
+    assert out.count("续期到") == 3, f"三条应各有一行续期：\n{out}"
+    after = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
+    for cid in ("c-001", "c-002", "c-003"):
+        assert after[cid] != before[cid], f"{cid} 的复核期应当往后推"
+    assert all(c.get("renewed_reason") == "现在还是这样" for c in jsonl(d, "claims.jsonl"))
+
+
+@case
+def 批量退役一个理由带走一批():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    code, out = run(d, "commit.py", "--retire", "c-001,c-002", "--reason", "这两条都不认了")
+    assert code == 0, out
+    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
+    assert rows["c-001"]["status"] == "retired" and rows["c-002"]["status"] == "retired", rows
+    assert rows["c-003"]["status"] == "active", "没点名的不该被动"
+    assert rows["c-001"]["retired_reason"] == "这两条都不认了"
+
+
+@case
+def 到期只摆N条剩下排队():
+    d = sandbox()
+    seed(d)                      # 先有事实，否则依据悬空会全进草稿
+    old = days_ago(150)          # state +90 天 → 逾期 60 天
+    put(d, "c.json", [{"topic": "work", "type": "state",
+                       "text": f"占位状态第{i}条",
+                       "context": f"他说每天凌晨四点到店里，先发面再烤第一批——第{i}条占位说明。",
+                       "source": "ai", "confidence": "inferred",
+                       "since": old, "basis": ["f-0001"]} for i in range(1, 5)]
+                 + [{"topic": "identity", "type": "constant",
+                     "text": "占位常量：虚构生日",
+                     "context": "他说每天凌晨四点到店里，先发面再烤第一批——这条只是背景。",
+                     "source": "ai", "confidence": "inferred", "basis": ["f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    code, out = run(d, "commit.py", "--due", "2")
+    assert code == 0, out
+    assert "constant" not in out, f"常量没有复核期，不该出现在到期里：\n{out}"
+    assert "今天先看 2 条" in out, out
+    assert "剩下 2 条排着" in out, f"该说清还有多少没轮到：\n{out}"
+    assert out.count("逾期 60 天") == 2, out
+    assert "--renew c-001,c-002" in out, f"该教批量写法：\n{out}"
+    code, out = run(d, "commit.py", "--due")
+    assert "今天先看 3 条" in out and "剩下 1 条排着" in out, f"默认摆 3 条：\n{out}"
+
+
+@case
+def 债攒多了不会闭嘴():
+    d = sandbox()
+    seed(d)                      # 3 条事实，没有判断
+    old = days_ago(35)
+    put(d, "more.json", [{"date": old, "kind": "自述", "asked": "最近在忙什么",
+                          "text": f"虚构第 {i} 条：店里那台旧烤箱又响了一声。",
+                          "topic": "work", "source": "user"} for i in range(30)])
+    code, out = run(d, "commit.py", "--facts", "more.json")
+    assert code == 0, out
+    code, out = run(d, "check.py")
+    assert "攒得有点多" in out, f"33 条债该说一句：\n{out}"
+    assert "三选一" in out, f"最老那条该点名：\n{out}"
+
+
+# ---------------------------------------------------------------- 性能
+
+@case
+def g7_120条不会退化成分钟级():
+    d = sandbox()
+    put(d, "f.json", fx.base_facts(TODAY)[:1])
+    code, out = run(d, "commit.py", "--facts", "f.json")
+    assert code == 0, out
+    # 性能测试要超过 60 条，只能绕过闸门直接写盘（这里测的是 check 的速度，不是上限）
+    rows = fx.bulk_claims(120)
+    for i, r in enumerate(rows):
+        r["id"] = f"c-{i + 1:03d}"
+        r["since"] = TODAY
+        r["review_after"] = (date.today() + timedelta(days=365)).isoformat()
+        r["supersedes"] = []
+        r["status"] = "active"
+    (d / "me" / "claims.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8")
+    run(d, "build.py")
+    t0 = time.time()
+    run(d, "check.py")
+    cost = time.time() - t0
+    # 这个数含了解释器启动（Windows 上 0.3–0.6s），所以它不是基准测试。
+    # 3 秒只抓一件事：check 别退化成"每条判断扫一遍全部事实"那种平方级实现。
+    assert cost < 3.0, f"check 用了 {cost:.2f}s，怀疑退化成了平方级"
+
+
+def main():
+    keep = "--keep" in sys.argv
+    started = time.time()
+    ok, bad = 0, []
+    for fn in CASES:
+        name = fn.__name__
+        t0 = time.time()
+        try:
+            fn()
+            print(f"✅ {name}  ({time.time() - t0:.1f}s)")
+            ok += 1
+        except AssertionError as e:
+            print(f"❌ {name}  ({time.time() - t0:.1f}s)\n   {e}")
+            bad.append(name)
+        except Exception as e:                     # noqa: BLE001
+            print(f"💥 {name}  ({time.time() - t0:.1f}s)\n   {type(e).__name__}: {e}")
+            bad.append(name)
+    print(f"\n{ok} / {len(CASES)} 通过 ｜ 总耗时 {time.time() - started:.1f}s"
+          f" ｜ 起了 {CALLS[0]} 次子进程")
+    if bad:
+        print("失败：" + "、".join(bad))
+    if not keep:
+        for d in TMP:
+            shutil.rmtree(d, ignore_errors=True)
+    else:
+        print("临时目录：" + "、".join(str(d) for d in TMP))
+    return 0 if not bad else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
