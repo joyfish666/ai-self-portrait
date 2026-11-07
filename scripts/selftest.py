@@ -493,6 +493,52 @@ def 新域自动进完整度分母():
     assert "覆盖 0/9" in p, f"分母应当跟着 DOMAINS 走，不该写死：\n{p[:300]}"
 
 
+@case
+def 撤依据不能把判断掏空():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())      # c-001 原本只有 f-0001 一条依据
+    code, out = run(d, "commit.py", "--attach", "c-001:f-0002,f-0003")
+    assert code == 0, out
+    code, out = run(d, "commit.py", "--detach", "c-001:f-0002,f-0003")
+    assert code == 0, out
+    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
+    assert rows["c-001"]["basis"] == ["f-0001"], rows["c-001"]["basis"]
+    assert "撤依据" in out, out
+    # 撤掉最后一条：不是接错线，是这条判断没证据了 —— 必须拒绝
+    code, out = run(d, "commit.py", "--detach", "c-001:f-0001")
+    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
+    assert rows["c-001"]["basis"] == ["f-0001"], f"撤空被拒后依据不该动：{rows['c-001']['basis']}"
+    assert "一条依据都不剩" in out, out
+
+
+@case
+def 换依据要连context一起换():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    put(d, "r.json", [{"id": "c-001", "add": ["f-0002"], "del": ["f-0001"],
+                       "context": "他说想自己开一家小店，但一直没算过账——所以先看钱，不看手感。",
+                       "reason": "原来的依据接错了"}])
+    code, out = run(d, "commit.py", "--rewire", "r.json")
+    assert code == 0, out
+    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
+    assert rows["c-001"]["basis"] == ["f-0002"], rows["c-001"]["basis"]
+    assert rows["c-001"]["rewired_reason"] == "原来的依据接错了"
+    assert "换依据" in out, out
+
+
+@case
+def 换依据时context必须引用新依据():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    bad = "这句话跟两条依据都没关系，纯粹是一段用来测试校验的说明文字。"
+    put(d, "r.json", [{"id": "c-001", "add": ["f-0002"], "del": [], "context": bad, "reason": "测"}])
+    code, out = run(d, "commit.py", "--rewire", "r.json")
+    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
+    assert code == 0, out
+    assert rows["c-001"]["context"] != bad, "不合格的 context 不该被写进去"
+    assert "没引用任何新依据的原话" in out, out
+
+
 # ---------------------------------------------------------------- 性能
 
 @case

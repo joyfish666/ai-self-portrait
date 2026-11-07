@@ -72,9 +72,12 @@ class Receipt:
         excluded = sum(1 for r in self.rows if r[0] == "🚫")
         doors = sum(1 for r in self.rows if r[0] == "🚪")
         retopied = sum(1 for r in self.rows if r[0] == "📁")
+        detached = sum(1 for r in self.rows if r[0] == "✂️")
+        rewired = sum(1 for r in self.rows if r[0] == "🔄")
         drafted = sum(1 for r in self.rows if r[0] == "🔶")
         skipped = sum(1 for r in self.rows if r[0] == "➖")
-        lost = self.inputs - stored - excluded - doors - retopied - drafted - skipped
+        lost = (self.inputs - stored - excluded - doors - retopied
+                - detached - rewired - drafted - skipped)
         print(f"\n本轮对账（输入 {self.inputs} 条）")
         for icon, ident, what, detail in self.rows:
             tail = f"  {detail}" if detail else ""
@@ -84,6 +87,10 @@ class Receipt:
             parts.append(f"{doors} 退役/续期")
         if retopied:
             parts.append(f"{retopied} 改归档")
+        if detached:
+            parts.append(f"{detached} 撤依据")
+        if rewired:
+            parts.append(f"{rewired} 换依据")
         parts += [f"{drafted} 进草稿", f"{skipped} 跳过", f"{lost} 丢失"]
         print("\n📊 " + " ｜ ".join(parts))
         return lost
@@ -246,6 +253,96 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
         if kinds and all(k == "行为" for k in kinds):
             rc.add("⚠️", c["id"], f"落在 {c['topic']}，但依据全来自干活现场",
                    "这条是不是写高了？拿掉这个场合，还有别的场合也符合吗")
+
+
+def detach_basis(specs, claims, facts, rc):
+    """撤掉一条接错的依据：c-055:f-0093,f-0156。
+
+    什么时候用：判断引用的那条"事实"其实是我自己写的结论（kind=AI观察），
+    真正的原话在库里躺着。这不是"清理"，是**把线接到该接的地方**。
+
+    铁底：撤完必须还剩 ≥1 条依据。撤空了就不是修线，是把判断掏空——
+    那种情况该走 supersede（换一条新判断），不能靠连删。
+    """
+    by_c = {c["id"]: c for c in claims if c.get("status") == "active"}
+    by_f = {f["id"]: f for f in facts}
+    for spec in specs:
+        if ":" not in spec:
+            rc.count_input()
+            rc.add("➖", spec, "格式不对", "应为 c-055:f-0093,f-0156")
+            continue
+        cid, ids = spec.split(":", 1)
+        c = by_c.get(cid)
+        if not c:
+            rc.count_input()
+            rc.add("➖", cid, "不存在或非活跃")
+            continue
+        want = [x.strip() for x in ids.split(",") if x.strip()]
+        gone = [i for i in want if i in c.get("basis", [])]
+        miss = [i for i in want if i not in c.get("basis", [])]
+        if miss:
+            rc.count_input()
+            rc.add("➖", cid, "这些本来就不在它的依据里", f"{miss}")
+        if not gone:
+            continue
+        if len(c["basis"]) - len(gone) < 1:
+            rc.count_input()
+            rc.add("➖", cid, "撤完一条依据都不剩", "这不是接错线，是这条判断没证据——该 supersede 或 retire")
+            continue
+        for i in gone:
+            rc.count_input()          # 一条依据一条账，否则对账单会算出负数
+            c["basis"].remove(i)
+            f = by_f.get(i, {})
+            tail = "（那条其实是我写的结论）" if f.get("kind") == "AI观察" else ""
+            rc.add("✂️", cid, f"撤依据 {i}", f"{clean(f.get('text', ''), 40)}{tail}")
+
+
+def rewire_claims(rows, claims, facts, rc):
+    """换依据：一条判断原来指向"我自己的结论"，改成指向他的原话。
+
+    为什么必须是一个动作，而不是 --attach + --detach：
+    `context` 里引用的是依据原话，换了依据，context 往往也引错了对象——
+    所以"换线"在数据里是**依据 + context 一起换**的三件事。拆开做，
+    中间那个状态是坏的（context 指向一条已经被撤掉的依据）。
+
+    rows：[{"id":"c-055","add":[…],"del":[…],"context":"新解释（可省）","reason":"为什么换"}]
+    """
+    by_c = {c["id"]: c for c in claims if c.get("status") == "active"}
+    by_f = {f["id"]: f for f in facts}
+    for row in rows:
+        cid = row.get("id")
+        rc.count_input()
+        c = by_c.get(cid)
+        if not c:
+            rc.add("➖", cid, "不存在或非活跃")
+            continue
+        add = [x for x in (row.get("add") or [])]
+        dele = [x for x in (row.get("del") or [])]
+        bad = [x for x in add if x not in by_f or by_f[x].get("excluded")]
+        if bad:
+            rc.add("➖", cid, "要接的原话不存在或已被排除", f"{bad}")
+            continue
+        newb = [b for b in c["basis"] if b not in dele]
+        newb += [x for x in add if x not in newb]
+        if not newb:
+            rc.add("➖", cid, "换完一条依据都不剩", "该 supersede 或 retire，不是换线")
+            continue
+        ctx = row.get("context")
+        if ctx is not None:
+            if not (30 <= len(ctx) <= 150):
+                rc.add("➖", cid, f"新 context {len(ctx)} 字", "应 30–150")
+                continue
+            src = "".join((by_f[b].get("text") or "") for b in newb)
+            if not has_fragment(ctx, src):
+                rc.add("➖", cid, "新 context 没引用任何新依据的原话", "必须含连续 8 字")
+                continue
+        c["basis"] = newb
+        if ctx is not None:
+            c["context"] = ctx
+        c["rewired_at"] = today_iso()
+        c["rewired_reason"] = row.get("reason") or ""
+        rc.add("🔄", cid, f"换依据 −{len(dele)} +{len(add)}",
+               f"{row.get('reason', '')}")
 
 
 def take_tension(raw, tensions, claims, rc, drafts, refmap):
@@ -484,6 +581,10 @@ def main():
     ap.add_argument("--tensions")
     ap.add_argument("--attach", action="append", default=[],
                     help="c-023:f-0001,f-0002，可重复")
+    ap.add_argument("--detach", action="append", default=[],
+                    help="撤掉接错的依据：c-055:f-0093,f-0156（撤完必须还剩 ≥1 条）")
+    ap.add_argument("--rewire",
+                    help="换依据+换 context 一次做完（JSON 文件，见 AGENTS.md）")
     ap.add_argument("--exclude", help="逗号分隔的 fact id")
     ap.add_argument("--skip", help="永久跳过某个域（要 --reason）")
     ap.add_argument("--defer", help="暂时不想聊某个域（要 --reason，默认 30 天）")
@@ -654,6 +755,10 @@ def main():
             return 1
 
     attach_delta = attach_basis(args.attach, claims, facts, rc)
+    if args.detach:
+        detach_basis(args.detach, claims, facts, rc)
+    if args.rewire:
+        rewire_claims(load_any(args.rewire), claims, facts, rc)
 
     for raw in (load_any(args.claims) if args.claims else []):
         take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions)
