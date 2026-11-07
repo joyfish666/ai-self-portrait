@@ -539,6 +539,59 @@ def 换依据时context必须引用新依据():
     assert "没引用任何新依据的原话" in out, out
 
 
+@case
+def 观察也要写asked():
+    d = sandbox()
+    seed(d)
+    put(d, "f2.json", [{"ref": "x", "date": TODAY, "kind": "AI观察",
+                        "text": "他当天交出了一页纸。", "topic": "work", "source": "ai"}])
+    code, out = run(d, "commit.py", "--facts", "f2.json")
+    assert code == 0, out
+    assert "1 进草稿" in out, f"没写 asked 的观察该进草稿：\n{out}"
+    assert not [f for f in jsonl(d, "facts.jsonl") if f.get("kind") == "AI观察"], \
+        "不该有任何 AI观察 落库"
+
+
+@case
+def 依据全是我观察到的会报一句():
+    d = sandbox()
+    seed(d)
+    put(d, "f2.json", [{"ref": "o", "date": TODAY, "kind": "AI观察",
+                        "asked": "我在看他做的东西", "text": "他当天交出了一页纸。",
+                        "topic": "work", "source": "ai"}])
+    code, out = run(d, "commit.py", "--facts", "f2.json")
+    assert code == 0, out
+    fid = [f for f in jsonl(d, "facts.jsonl") if f.get("kind") == "AI观察"][0]["id"]
+    put(d, "c.json", [{"topic": "work", "type": "disposition",
+                       "text": "他做事要一页纸那么大",
+                       "context": "他当天交出了一页纸，从背景、难点、设计一直写到复盘——尺寸决定他动不动手。",
+                       "source": "ai", "confidence": "inferred", "basis": [fid]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    code, out = run(d, "check.py")
+    assert "没有一句他自己的话" in out, f"只有观察当依据，该报一句：\n{out}"
+
+
+@case
+def 观察配上原话就不再报():
+    d = sandbox()
+    seed(d)
+    put(d, "f2.json", [{"ref": "o", "date": TODAY, "kind": "AI观察",
+                        "asked": "我在看他做的东西", "text": "他当天交出了一页纸。",
+                        "topic": "work", "source": "ai"}])
+    code, out = run(d, "commit.py", "--facts", "f2.json")
+    assert code == 0, out
+    fid = [f for f in jsonl(d, "facts.jsonl") if f.get("kind") == "AI观察"][0]["id"]
+    put(d, "c.json", [{"topic": "work", "type": "disposition",
+                       "text": "他做事要一页纸那么大",
+                       "context": "他当天交出了一页纸，还说先发面再烤第一批——尺寸决定他动不动手。",
+                       "source": "ai", "confidence": "inferred", "basis": [fid, "f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    code, out = run(d, "check.py")
+    assert "没有一句他自己的话" not in out, f"有他的原话就不该报：\n{out}"
+
+
 # ---------------------------------------------------------------- 性能
 
 @case
