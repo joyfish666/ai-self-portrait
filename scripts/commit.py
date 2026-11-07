@@ -71,9 +71,10 @@ class Receipt:
         stored = sum(1 for r in self.rows if r[0] == "✅")
         excluded = sum(1 for r in self.rows if r[0] == "🚫")
         doors = sum(1 for r in self.rows if r[0] == "🚪")
+        retopied = sum(1 for r in self.rows if r[0] == "📁")
         drafted = sum(1 for r in self.rows if r[0] == "🔶")
         skipped = sum(1 for r in self.rows if r[0] == "➖")
-        lost = self.inputs - stored - excluded - doors - drafted - skipped
+        lost = self.inputs - stored - excluded - doors - retopied - drafted - skipped
         print(f"\n本轮对账（输入 {self.inputs} 条）")
         for icon, ident, what, detail in self.rows:
             tail = f"  {detail}" if detail else ""
@@ -81,6 +82,8 @@ class Receipt:
         parts = [f"{stored} 入库", f"{excluded} 排除"]
         if doors:
             parts.append(f"{doors} 退役/续期")
+        if retopied:
+            parts.append(f"{retopied} 改归档")
         parts += [f"{drafted} 进草稿", f"{skipped} 跳过", f"{lost} 丢失"]
         print("\n📊 " + " ｜ ".join(parts))
         return lost
@@ -237,6 +240,13 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
         note += "（ai 不能 confirmed，已降为 inferred）"
     rc.add("✅", c["id"], "新增判断", note)
 
+    # 话别说得比证据远：依据全来自"干活现场"（kind=行为），判断却落在生活域
+    if c.get("topic") not in ("work", "interface", "misc"):
+        kinds = [fid_map[b].get("kind") for b in c.get("basis", []) if b in fid_map]
+        if kinds and all(k == "行为" for k in kinds):
+            rc.add("⚠️", c["id"], f"落在 {c['topic']}，但依据全来自干活现场",
+                   "这条是不是写高了？拿掉这个场合，还有别的场合也符合吗")
+
 
 def take_tension(raw, tensions, claims, rc, drafts, refmap):
     t = dict(raw)
@@ -360,6 +370,35 @@ def renew_claim(cid, reason, claims, rc):
     rc.add("🚪", cid, f"续期到 {c['review_after']}", reason)
 
 
+def retopic_claim(spec, reason, claims, rc):
+    """改归档：c-038:work。只改 topic 一个字段，不制造"曾经认为"的版本噪音。
+
+    为什么需要它：`topic` 是完整度的分母，归档写错就是数字错，而 check 抓不住——
+    它只验"topic 合法"，不验"topic 对不对"。supersede 会把同一句话写两遍，
+    retire 会让还在用的判断进"已退役"，两个都不对，所以单独一个动作。
+    """
+    cid, sep, topic = spec.partition(":")
+    cid, topic = cid.strip(), topic.strip()
+    if not sep or not cid or not topic:
+        rc.add("➖", spec, "格式应为 c-038:work")
+        return
+    if not check_mod.valid_topic(topic):
+        rc.add("➖", cid, "域非法", topic)
+        return
+    c = next((x for x in claims if x["id"] == cid), None)
+    if not c:
+        rc.add("➖", cid, "找不到这条判断")
+        return
+    old = c.get("topic")
+    if old == topic:
+        rc.add("➖", cid, "已经在这个域里了", topic)
+        return
+    c["topic"] = topic
+    c["retopied_at"] = today_iso()
+    c["retopied_reason"] = reason
+    rc.add("📁", cid, f"{old} → {topic}", f"{clean(c.get('text', ''))}｜{reason}")
+
+
 def update_state(round_no, topic):
     p = ME / "state.json"
     st = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
@@ -452,6 +491,7 @@ def main():
     ap.add_argument("--retire", help="退役判断，逗号分隔可批量（要 --reason）")
     ap.add_argument("--unretire", help="把退役的判断放回来，逗号分隔可批量")
     ap.add_argument("--renew", help="续期：复核期往后推，逗号分隔可批量")
+    ap.add_argument("--retopic", help="改归档：c-038:work,c-060:work（要 --reason）")
     ap.add_argument("--due", nargs="?", type=int, const=3, default=None, metavar="N",
                     help="摆出复核期到了的判断，今天先看 N 条（默认 3）")
     ap.add_argument("--action", choices=["noise", "archived"], default="noise")
@@ -571,7 +611,7 @@ def main():
         topics.append(row)
         rc.add("✅", dom, "跳过" if kind == "skipped" else f"暂缓 {args.days} 天", args.reason)
 
-    if args.retire or args.unretire or args.renew:
+    if args.retire or args.unretire or args.renew or args.retopic:
         if args.retire:
             if not args.reason:
                 print("--retire 必须带 --reason（否则就是静默删除）")
@@ -590,6 +630,13 @@ def main():
             for cid in id_list(args.renew):
                 rc.count_input()
                 renew_claim(cid, args.reason, claims, rc)
+        if args.retopic:
+            if not args.reason:
+                print("--retopic 必须带 --reason（归档错了也要留痕：为什么它不在那儿）")
+                return 1
+            for spec in id_list(args.retopic):
+                rc.count_input()
+                retopic_claim(spec, args.reason, claims, rc)
 
     for raw in (load_any(args.facts) if args.facts else []):
         take_fact(raw, facts, rc, drafts, refmap)

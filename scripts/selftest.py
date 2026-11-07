@@ -398,6 +398,72 @@ def 债攒多了不会闭嘴():
     assert "三选一" in out, f"最老那条该点名：\n{out}"
 
 
+# ---------------------------------------------------------------- 归档
+
+@case
+def 改归档只动一个字段不制造版本噪音():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    before = jsonl(d, "claims.jsonl")
+    code, out = run(d, "commit.py", "--retopic", "c-002:values",
+                    "--reason", "这是一句价值判断，不该放在目标里")
+    assert code == 0, out
+    assert "goals → values" in out, out
+    assert "1 改归档" in out, f"改归档要进对账单的计数，不能算成丢失：\n{out}"
+    assert "1 丢失" not in out, out
+    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
+    assert rows["c-002"]["topic"] == "values", rows["c-002"]
+    assert rows["c-002"]["status"] == "active", "改归档不该让判断退出在役"
+    assert rows["c-002"]["retopied_reason"] == "这是一句价值判断，不该放在目标里"
+    assert len(rows) == len(before), f"改归档不该新增判断：{len(before)} → {len(rows)}"
+    assert not any(c.get("supersedes") for c in rows.values()), "不该出现取代关系"
+    # 画像要跟着搬
+    run(d, "build.py")
+    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    assert "想开店，但没算过账" in p, "搬完还在画像里"
+
+
+@case
+def 改归档必须写理由():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    code, out = run(d, "commit.py", "--retopic", "c-002:values")
+    assert code != 0, "没写理由应当拒绝"
+    assert "必须带 --reason" in out, out
+
+
+@case
+def 依据全来自干活现场会问一句():
+    d = sandbox()
+    seed(d)                                   # 先有基准事实
+    put(d, "f2.json", [{"ref": "x", "date": TODAY, "kind": "行为",
+                        "asked": "我提了三种做法让他挑",
+                        "text": "你别给我选项，直接说你推荐哪个。",
+                        "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f2.json")
+    assert code == 0, out
+    fid = [f for f in jsonl(d, "facts.jsonl") if f["text"].startswith("你别给我选项")][0]["id"]
+    # 同一条依据，落在 work 里不该问（工作场合的行为撑得起工作判断）
+    put(d, "c1.json", [{"topic": "work", "type": "disposition",
+                        "text": "要他表态，不要一堆选项",
+                        "context": "他说你别给我选项，直接说你推荐哪个——选项摆出来还不够，还要有人给个倾向。",
+                        "source": "ai", "confidence": "inferred", "basis": [fid]}])
+    code, out = run(d, "commit.py", "--claims", "c1.json")
+    assert code == 0, out
+    assert "1 进草稿" not in out, f"这条本身该合格：\n{out}"
+    assert "写高了" not in out, f"work 不该触发这条提示：\n{out}"
+    # 同一句话硬提到 values，就该问一句
+    put(d, "c2.json", [{"topic": "values", "type": "disposition",
+                        "text": "要人承担判断，不接受推回来",
+                        "context": "他说你别给我选项，直接说你推荐哪个——从这里推到他要人承担判断，跳了一步。",
+                        "source": "ai", "confidence": "inferred", "basis": [fid]}])
+    code, out = run(d, "commit.py", "--claims", "c2.json")
+    assert code == 0, out
+    assert "1 进草稿" not in out, f"这条本身该合格：\n{out}"
+    assert "写高了" in out, f"依据全来自干活现场却落在 values，应当问一句：\n{out}"
+    assert "还有别的场合" in out, out
+
+
 # ---------------------------------------------------------------- 性能
 
 @case

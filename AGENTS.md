@@ -100,9 +100,9 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
 
 **5. 删掉临时 JSON 文件。**
 
-## 分拣：四件事（这是你最自由的环节，也是最容易漂的环节）
+## 分拣：五件事（这是你最自由的环节，也是最容易漂的环节）
 
-代码只管格式，下面四个决定全靠你。**按这个来，别每轮换标准。**
+代码只管格式，下面五个决定全靠你。**按这个来，别每轮换标准。**
 
 **① 这句话记不记**
 
@@ -140,6 +140,18 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
   那时候你手上判断更多，更容易看出该挂哪条
 - 硬挂是这个系统里唯一**验不出来**的动作，所以宁欠勿硬挂
 
+**⑤ 这句话说了多远（写完判断，回头看一眼）**
+
+两条一起用，是同一个错误的两个方向：
+
+- **域**：按"这属于他哪一块"分，**不按在哪儿看到的**。`ai_usage` 和 `supplier_usage` 是同一种错
+- **判断**：说到证据能覆盖的高度。**干活现场的观察，只能支撑 `work` / `interface` 层面的判断**
+
+最常犯的是第二条：从"他要 AI 表态"推成"他要人承担判断"。**对 AI 的态度不等于对人的态度。**
+想把判断升到"他这个人怎样"，得有别场合的证据，或者他明确说过。
+
+`commit.py` 会问一句（不拦）：`⚠️ c-081 落在 values，但依据全来自干活现场 —— 这条是不是写高了？`
+
 ## 否决流程
 
 用户说"不对"时：
@@ -169,7 +181,13 @@ python scripts/commit.py --renew c-013 --reason "现在还是每周 40 小时"
 python scripts/commit.py --renew c-013,c-014,c-015 --reason "这批都还是这样"   # 一批
 python scripts/commit.py --retire c-013 --reason "读研才有的角色，毕业就没了"
 python scripts/commit.py --unretire c-013          # 退错了，放回来
+python scripts/commit.py --retopic c-038:work --reason "这是能力状况，不是协作规则"   # 归档写错了
+python scripts/commit.py --retopic c-038:work,c-060:work,c-068:work --reason "这三条都是日常怎么做"  # 一批
 ```
+
+**`--retopic` 是"归档写错了"，不是四种收场之一。** 它只改 `topic` 一个字段：
+判断不退出在役、不进「曾经认为」、不产生两条一模一样的句子。
+所以**别为了挪域去 supersede**——那会在画像里留下两条同义的话。
 
 **到期是队列，不是欠债。** 先跑 `--due` 摆出 3 条，**看完这 3 条就停**——
 剩下多少它自己会说（`剩下 N 条排着`）。一次把 18 条全摆给用户，就是在拿系统的事烦他。
