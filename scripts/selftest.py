@@ -685,6 +685,30 @@ def methods算干活现场不算写高():
     assert "写高了" in out, f"同样的证据落到 values 要报：\n{out}"
 
 
+@case
+def 原话里的邮箱能遮掉且行不丢():
+    d = sandbox()
+    seed(d)
+    put(d, "s.json", [{"text": "我的邮箱是 someone@example.com，别传上去"}])
+    code, out = run(d, "commit.py", "--said", "s.json")
+    assert code == 0, out
+    sid = jsonl(d, "transcript.jsonl")[0]["id"]
+    # 先确认 check 会报
+    code, out = run(d, "check.py")
+    assert "里有邮箱" in out, f"有邮箱该报：\n{out}"
+    # 遮掉
+    code, out = run(d, "commit.py", "--redact", sid, "--reason", "测试：遮掉邮箱")
+    assert code == 0, out
+    assert "遮住 1 处" in out, out
+    rows = jsonl(d, "transcript.jsonl")
+    assert len(rows) == 1, "行不能被删——删了就没法证明这句话处理过"
+    assert "someone@example.com" not in rows[0]["text"], rows[0]["text"]
+    assert "邮箱已遮" in rows[0]["text"], rows[0]["text"]
+    assert rows[0]["redact_reason"] == "测试：遮掉邮箱"
+    code, out = run(d, "check.py")
+    assert "里有邮箱" not in out, f"遮完就不该再报：\n{out}"
+
+
 # ---------------------------------------------------------------- 性能
 
 @case

@@ -469,6 +469,16 @@ def main():
             warns.append(f"当前域 {cur} 在暂缓期（到 {t.get('until')}）—— 换下一域")
         break
 
+    # 敏感串：邮箱/手机号一旦进了 me/，就是在本地埋了个雷
+    for name, rows in (("facts", facts), ("claims", claims), ("transcript", transcript)):
+        for r in rows:
+            blob = " ".join(str(r.get(k, "")) for k in ("text", "context", "asked"))
+            got = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", blob)
+            if got:
+                warns.append(f"{name} 的 {r.get('id')} 里有邮箱（{got[0]}）"
+                             f" —— 用 commit.py --redact 遮掉，别让它跟着备份或同步跑出去")
+                break
+
     # 原话覆盖：你说过的话，有没有一句没落到事实上
     live_texts = [f["text"] for f in facts if not f.get("excluded")]
     missing = [s for s in transcript

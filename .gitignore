@@ -9,3 +9,7 @@ desktop.ini
 *.tmp
 __pycache__/
 me.bak/
+
+# 会话原始记录：绝不提交（一整份对话，含真实身份与第三方信息）
+dsh-session-*
+*.session.v4.jsonl

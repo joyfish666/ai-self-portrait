@@ -76,10 +76,11 @@ class Receipt:
         retopied = sum(1 for r in self.rows if r[0] == "📁")
         detached = sum(1 for r in self.rows if r[0] == "✂️")
         rewired = sum(1 for r in self.rows if r[0] == "🔄")
+        redacted = sum(1 for r in self.rows if r[0] == "🕶️")
         drafted = sum(1 for r in self.rows if r[0] == "🔶")
         skipped = sum(1 for r in self.rows if r[0] == "➖")
         lost = (self.inputs - stored - excluded - doors - retopied
-                - detached - rewired - drafted - skipped)
+                - detached - rewired - redacted - drafted - skipped)
         print(f"\n本轮对账（输入 {self.inputs} 条）")
         for icon, ident, what, detail in self.rows:
             tail = f"  {detail}" if detail else ""
@@ -93,6 +94,8 @@ class Receipt:
             parts.append(f"{detached} 撤依据")
         if rewired:
             parts.append(f"{rewired} 换依据")
+        if redacted:
+            parts.append(f"{redacted} 遮敏感")
         parts += [f"{drafted} 进草稿", f"{skipped} 跳过", f"{lost} 丢失"]
         print("\n📊 " + " ｜ ".join(parts))
         return lost
@@ -365,6 +368,37 @@ def rewire_claims(rows, claims, facts, rc):
                f"{row.get('reason', '')}")
 
 
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+SECRETS = [(EMAIL_RE, "[邮箱已遮]"), (PHONE_RE, "[手机号已遮]")]
+
+
+def redact_transcript(ids, reason, transcript, rc):
+    """把一条原话里的邮箱/手机号遮掉，行留着。
+
+    为什么不删整行：删了就没法再证明"你说的每句都处理过"——那是对账单的地基。
+    遮掉敏感串、留下 `redacted_at` 和原因，是"我处理过它"的痕迹，比删更诚实。
+    """
+    by = {t.get("id"): t for t in transcript}
+    for i in ids:
+        rc.count_input()
+        t = by.get(i)
+        if not t:
+            rc.add("➖", i, "找不到这条原话")
+            continue
+        text = t.get("text", "")
+        hits = sum(len(rx.findall(text)) for rx, _ in SECRETS)
+        if not hits:
+            rc.add("➖", i, "这条里没有可遮的邮箱或手机号")
+            continue
+        for rx, mask in SECRETS:
+            t["text"] = rx.sub(mask, t["text"])
+        t["redacted_at"] = today_iso()
+        t["redact_reason"] = reason
+        t["redact_hits"] = hits
+        rc.add("🕶️", i, f"遮住 {hits} 处", reason)
+
+
 def take_tension(raw, tensions, claims, rc, drafts, refmap):
     t = dict(raw)
     rc.count_input()
@@ -605,6 +639,7 @@ def main():
                     help="撤掉接错的依据：c-055:f-0093,f-0156（撤完必须还剩 ≥1 条）")
     ap.add_argument("--rewire",
                     help="换依据+换 context 一次做完（JSON 文件，见 AGENTS.md）")
+    ap.add_argument("--redact", help="遮住原话里的邮箱/手机号：s-0120（要 --reason）")
     ap.add_argument("--exclude", help="逗号分隔的 fact id")
     ap.add_argument("--skip", help="永久跳过某个域（要 --reason）")
     ap.add_argument("--defer", help="暂时不想聊某个域（要 --reason，默认 30 天）")
@@ -732,7 +767,7 @@ def main():
         topics.append(row)
         rc.add("✅", dom, "跳过" if kind == "skipped" else f"暂缓 {args.days} 天", args.reason)
 
-    if args.retire or args.unretire or args.renew or args.retopic:
+    if args.retire or args.unretire or args.renew or args.retopic or args.redact:
         if args.retire:
             if not args.reason:
                 print("--retire 必须带 --reason（否则就是静默删除）")
@@ -751,6 +786,12 @@ def main():
             for cid in id_list(args.renew):
                 rc.count_input()
                 renew_claim(cid, args.reason, claims, rc)
+        if args.redact:
+            if not args.reason:
+                print("--redact 必须带 --reason（为什么遮，留给以后看）")
+                return 1
+            for sid in id_list(args.redact):
+                redact_transcript([sid], args.reason, transcript, rc)
         if args.retopic:
             if not args.reason:
                 print("--retopic 必须带 --reason（归档错了也要留痕：为什么它不在那儿）")
