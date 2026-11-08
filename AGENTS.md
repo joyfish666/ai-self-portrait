@@ -332,7 +332,7 @@ python scripts/check.py          # 一圈体检
 **改过 `scripts/` 里任何一行，都要跑一遍：**
 
 ```bash
-python scripts/selftest.py       # 把八条承诺逐条验一遍，38 个用例、约 4 分钟（给足超时）
+python scripts/selftest.py       # 把八条承诺逐条验一遍，用例数随功能增加，约 4 分钟（给足超时）
 ```
 
 它用**虚构数据**在临时目录里从零建仓，把八条承诺逐条验一遍。**不全绿就等于改坏了**——

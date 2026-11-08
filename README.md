@@ -12,18 +12,18 @@
 
 ## 它长什么样
 
-聊天十轮之后，`me/PORTRAIT.md` 里会有这样的段落：
+画像里一条判断长这样（人物和原话取自 `examples/minimal/`，全是虚构数据）：
 
 ```markdown
-### 改配方改到后来，想整个重来
+### 很久没自己动手，缺的是产出感
 
-他说「这炉面包是一勺一勺添料添出来的，早该重写一遍了」——
-想重来，但换配方时「不要把老面丢了」，只看一句话不知道什么意思。
+他说「每天在开会、写需求文档、看数据，很久没自己动手做过东西了」——
+不满的不是忙，是没有自己的产出。
 
-`c-085` · `inferred` · `disposition` · 复核 2027-11-07 · 依据 4 条（f-0301、f-0302…）
+`c-005` · `inferred` · `disposition` · 复核 2027-11-05 · 依据 1 条（f-0001）
 ```
 
-**注意最后那行 `依据 4 条（f-0301…）`。** 每条判断都能点回到你的原话。
+**注意最后那行 `依据 1 条（f-0001）`。** 每条判断都能点回到你的原话。
 判断可以被推翻，原话不能被改写。
 
 ---
@@ -149,7 +149,7 @@ python scripts/init.py
 | `scripts/build.py` | 渲染两个视图 |
 | `scripts/check.py` | 一秒体检 + 坏味道清单 |
 | `scripts/synth.py` | 综述层：写作工作台 + 引用校验 |
-| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍（38 个用例，约 4 分钟） |
+| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍（用例数随功能增加，约 4 分钟） |
 | `scripts/digest.py` `suggest.py` `tension.py` | 消化债、依据召回、矛盾工作台 |
 | `examples/minimal/` | 起步阶段的完整示例 |
 | `me/` | **你的数据**（被 gitignore，不会提交；但它自己是一个 git 仓） |
@@ -164,7 +164,7 @@ python scripts/commit.py --due          # 今天到期待复核的（一次摆 3
 python scripts/commit.py --drafts       # 校验没过、等你决定怎么改的
 python scripts/commit.py --retire c-013 --reason "…"    # 退役（要理由）
 python scripts/commit.py --retopic c-038:work --reason "归档写错了"
-python scripts/commit.py --narrow c-069 --text "…" --context "…" --reason "原来那句说宽了"  # 标题+说明一起收窄
+python scripts/commit.py --narrow c-013 --text "…" --context "…" --reason "原来那句说宽了"  # 标题+说明一起收窄
 python scripts/commit.py --rewire x.json                # 换依据 + 换 context
 python scripts/selftest.py              # 改了 scripts/ 任何一行都要跑
 ```
