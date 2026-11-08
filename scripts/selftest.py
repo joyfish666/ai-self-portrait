@@ -656,6 +656,35 @@ def 硬规则从判断渲染不存副本():
     assert "- 先给结论再给理由" not in ctx, f"退役后硬规则不该还在下指令：\n{ctx[:600]}"
 
 
+@case
+def methods算干活现场不算写高():
+    """methods 就是"做事方式"，干活现场的观察撑得起它——不该报"写高了"。"""
+    d = sandbox()
+    seed(d)
+    put(d, "f2.json", [{"ref": "x", "date": TODAY, "kind": "行为",
+                        "asked": "我在给他演示流程",
+                        "text": "你先别做，让我看看这一步是怎么走的。",
+                        "topic": "methods", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f2.json")
+    assert code == 0, out
+    fid = [f for f in jsonl(d, "facts.jsonl") if f["text"].startswith("你先别做")][0]["id"]
+    put(d, "c.json", [{"topic": "methods", "type": "disposition",
+                       "text": "先看流程再动手",
+                       "context": "他说你先别做，让我看看这一步是怎么走的——动手之前先把路看清楚。",
+                       "source": "ai", "confidence": "inferred", "basis": [fid]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    assert "写高了" not in out, f"methods 不该触发这条：\n{out}"
+    # 但同样的依据落到 values，就该报
+    put(d, "c2.json", [{"topic": "values", "type": "disposition",
+                        "text": "他做事之前一定要先想明白",
+                        "context": "他说你先别做，让我看看这一步是怎么走的——所以他是个谨慎的人。",
+                        "source": "ai", "confidence": "inferred", "basis": [fid]}])
+    code, out = run(d, "commit.py", "--claims", "c2.json")
+    assert code == 0, out
+    assert "写高了" in out, f"同样的证据落到 values 要报：\n{out}"
+
+
 # ---------------------------------------------------------------- 性能
 
 @case

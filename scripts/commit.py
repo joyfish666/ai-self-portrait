@@ -268,7 +268,7 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
                "两条都在说这件事吗？是的话合并，不是就把区别写进 context")
 
     # 话别说得比证据远：依据全来自"干活现场"（kind=行为），判断却落在生活域
-    if c.get("topic") not in ("work", "interface", "misc"):
+    if c.get("topic") not in ("work", "methods", "interface", "misc"):
         kinds = [fid_map[b].get("kind") for b in c.get("basis", []) if b in fid_map]
         if kinds and all(k == "行为" for k in kinds):
             rc.add("⚠️", c["id"], f"落在 {c['topic']}，但依据全来自干活现场",
