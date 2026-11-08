@@ -13,6 +13,7 @@
     python scripts/commit.py --due                 # 复核期到了的，今天先摆 3 条
     python scripts/commit.py --due 5               # 摆 5 条
     python scripts/commit.py --renew c-013,c-014 --reason "还是一样"   # 一批
+    python scripts/commit.py --narrow c-013 --text "…" --reason "…"    # 只收窄措辞
     python scripts/commit.py --dry --facts ...     # 只预演，不写
 
 输入格式
@@ -77,10 +78,11 @@ class Receipt:
         detached = sum(1 for r in self.rows if r[0] == "✂️")
         rewired = sum(1 for r in self.rows if r[0] == "🔄")
         redacted = sum(1 for r in self.rows if r[0] == "🕶️")
+        narrowed = sum(1 for r in self.rows if r[0] == "✏️")
         drafted = sum(1 for r in self.rows if r[0] == "🔶")
         skipped = sum(1 for r in self.rows if r[0] == "➖")
         lost = (self.inputs - stored - excluded - doors - retopied
-                - detached - rewired - redacted - drafted - skipped)
+                - detached - rewired - redacted - narrowed - drafted - skipped)
         print(f"\n本轮对账（输入 {self.inputs} 条）")
         for icon, ident, what, detail in self.rows:
             tail = f"  {detail}" if detail else ""
@@ -96,6 +98,8 @@ class Receipt:
             parts.append(f"{rewired} 换依据")
         if redacted:
             parts.append(f"{redacted} 遮敏感")
+        if narrowed:
+            parts.append(f"{narrowed} 收窄措辞")
         parts += [f"{drafted} 进草稿", f"{skipped} 跳过", f"{lost} 丢失"]
         print("\n📊 " + " ｜ ".join(parts))
         return lost
@@ -550,6 +554,62 @@ def retopic_claim(spec, reason, claims, rc):
     rc.add("📁", cid, f"{old} → {topic}", f"{clean(c.get('text', ''))}｜{reason}")
 
 
+def narrow_claim(cid, text, context, reason, claims, fid_map, narrows, rc):
+    """只收窄措辞：改 active 判断的 text（可选连 context），其余一概不动。
+
+    判断不是证据，是当时的一个解释。改掉它不丢信息（原话还在），但走 supersedes
+    会凭空造出一条新判断、「曾经认为」一节、依据掉回消化债、复核期从今天重算——
+    改两个字要动七处，结果就是没人改。所以单独一个动作：不动 id / status / basis /
+    topic / type / review_after，只把旧文与理由记进 narrows.jsonl（人的决定），
+    由 build 渲染进 REVISIONS.md。理由必填 + me/ 每轮 git 留 diff，防静默修改。
+
+    context 里常常也写着说宽了的那句，所以允许一起换；但换完仍要过原来那道校验：
+    30–150 字，且必须含依据原话的连续 8 字。
+    """
+    c = next((x for x in claims if x["id"] == cid), None)
+    if not c:
+        rc.add("➖", cid, "找不到这条判断")
+        return
+    if c.get("status") != "active":
+        rc.add("➖", cid, "不是在役判断，不能收窄", str(c.get("status")))
+        return
+    text = (text or "").strip()
+    context = (context or "").strip()
+    old = c.get("text", "")
+    if not text:
+        rc.add("➖", cid, "没给新措辞（要 --text）")
+        return
+    if text == old and (not context or context == c.get("context", "")):
+        rc.add("➖", cid, "和原来一样，没什么可改")
+        return
+    if len(text) > check_mod.TEXT_MAX:
+        rc.add("➖", cid, f"新措辞超 {check_mod.TEXT_MAX} 字（{len(text)}）")
+        return
+    if context:
+        if not (check_mod.CTX_MIN <= len(context) <= check_mod.CTX_MAX):
+            rc.add("➖", cid, f"新 context {len(context)} 字",
+                   f"应 {check_mod.CTX_MIN}–{check_mod.CTX_MAX}")
+            return
+        srcs = [fid_map[b]["text"] for b in c.get("basis", [])
+                if b in fid_map and not fid_map[b].get("excluded")]
+        if not any(has_fragment(context, s) for s in srcs):
+            rc.add("➖", cid, "新 context 没含依据原话片段（8 字）")
+            return
+    row = {"id": cid, "date": today_iso(), "old": old,
+           "new": text, "reason": reason}
+    if context:
+        row["old_context"] = c.get("context", "")
+        row["new_context"] = context
+    narrows.append(row)
+    c["text"] = text
+    if context:
+        c["context"] = context
+    what = f"措辞收窄：{old} → {text}"
+    if context:
+        what += "（连说明一起换）"
+    rc.add("✏️", cid, what, reason)
+
+
 def update_state(round_no, topic):
     p = ME / "state.json"
     st = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
@@ -648,6 +708,10 @@ def main():
     ap.add_argument("--unretire", help="把退役的判断放回来，逗号分隔可批量")
     ap.add_argument("--renew", help="续期：复核期往后推，逗号分隔可批量")
     ap.add_argument("--retopic", help="改归档：c-038:work,c-060:work（要 --reason）")
+    ap.add_argument("--narrow", help="收窄措辞：c-069（要 --text 和 --reason）")
+    ap.add_argument("--text", help="--narrow 的新措辞（≤40 字）")
+    ap.add_argument("--context",
+                    help="--narrow 可同时换说明（30–150 字，仍要含依据 8 字原话片段）")
     ap.add_argument("--due", nargs="?", type=int, const=3, default=None, metavar="N",
                     help="摆出复核期到了的判断，今天先看 N 条（默认 3）")
     ap.add_argument("--action", choices=["noise", "archived"], default="noise")
@@ -669,6 +733,7 @@ def main():
     tensions, drafts = load("tensions.jsonl"), load("drafts.jsonl")
     transcript, rounds = load("transcript.jsonl"), load("rounds.jsonl")
     topics = load("topics.jsonl")
+    narrows = load("narrows.jsonl")
 
     if args.drafts:
         opened = [d for d in drafts if d.get("status", "open") == "open"]
@@ -767,7 +832,15 @@ def main():
         topics.append(row)
         rc.add("✅", dom, "跳过" if kind == "skipped" else f"暂缓 {args.days} 天", args.reason)
 
-    if args.retire or args.unretire or args.renew or args.retopic or args.redact:
+    if (args.retire or args.unretire or args.renew or args.retopic
+            or args.redact or args.narrow):
+        if args.narrow:
+            if not args.reason:
+                print("--narrow 必须带 --reason（改措辞也要留痕：原来那句哪里说宽了）")
+                return 1
+            rc.count_input()
+            narrow_claim(args.narrow.strip(), args.text, args.context, args.reason,
+                         claims, fid_map, narrows, rc)
         if args.retire:
             if not args.reason:
                 print("--retire 必须带 --reason（否则就是静默删除）")
@@ -861,6 +934,8 @@ def main():
     dump_jsonl(ME / "drafts.jsonl", drafts)
     dump_jsonl(ME / "transcript.jsonl", transcript + new_said)
     dump_jsonl(ME / "topics.jsonl", topics)
+    if args.narrow:
+        dump_jsonl(ME / "narrows.jsonl", narrows)
 
     stat = round_stats(facts_before, facts, claims_before, claims,
                        attach_delta, len(new_said), round_no)

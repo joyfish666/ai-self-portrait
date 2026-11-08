@@ -345,12 +345,13 @@ def render_changes(claims, prev):
     return tidy("\n".join(L))
 
 
-def render_revisions(claims):
-    """被推翻的 + 已退役的：谁取代了谁、为什么；哪些不用了、为什么。"""
+def render_revisions(claims, narrows=None):
+    """被推翻的 + 已退役的 + 措辞修正：谁取代了谁、为什么；哪些字改过、为什么。"""
+    narrows = narrows or []
     active = {c["id"]: c for c in claims if c.get("status") == "active"}
     dead = [c for c in claims if c.get("status") == "superseded"]
     retired = [c for c in claims if c.get("status") == "retired"]
-    if not dead and not retired:
+    if not dead and not retired and not narrows:
         return None
     by_target = {}
     for c in active.values():
@@ -378,6 +379,18 @@ def render_revisions(claims):
             L.append("")
             L.append(f"理由：{c.get('retired_reason','')}")
             L.append("")
+    if narrows:
+        L += ["---", "", "## 措辞修正", "",
+              "> 判断没错，只是当时说得比证据远。正文只换了几个字，旧文留在这里。", ""]
+        for n in sorted(narrows, key=lambda x: x.get("date", ""), reverse=True):
+            L.append(f"- {n.get('date','?')} · {n['id']}")
+            L.append(f"  - 原：{n.get('old','')}")
+            L.append(f"  - 改为：{n.get('new','')}")
+            L.append(f"  - 理由：{n.get('reason','')}")
+            if n.get("old_context"):
+                L.append(f"  - 原说明：{n.get('old_context','')}")
+                L.append(f"  - 新说明：{n.get('new_context','')}")
+            L.append("")
     return tidy(chr(10).join(L))
 
 
@@ -401,7 +414,7 @@ def main():
     atomic_write(ME / "CONTEXT.md", ctx)
 
     atomic_write(ME / "CHANGES.md", render_changes(claims, prev))
-    rev = render_revisions(claims)
+    rev = render_revisions(claims, load("narrows.jsonl"))
     if rev:
         atomic_write(ME / "REVISIONS.md", rev)
 

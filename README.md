@@ -61,6 +61,8 @@ python scripts/init.py
 
 判断被推翻时不是删除，而是分成三处：**曾经认为**（supersedes，划掉并写"改为…"）、
 **已退役**（retire，写理由，不再进正文）、**在役**。
+只是措辞说得比证据远，用 `--narrow` 直接收窄那句话——不造新判断，旧文和理由留在
+`REVISIONS.md` 的「措辞修正」里。
 
 ---
 
@@ -81,6 +83,10 @@ python scripts/init.py
 | G6 | 不靠上限拦人 | 60 条是**软线**（只提示），安全网 150 才拒；真正的管理靠"坏味道"（见下） |
 | G7 | 一秒体检 | `check.py`，纯代码，不调 LLM |
 | G8 | 不静默丢失 | 每条输入有终态；对账单里的"丢失"是**减法算出来的**，不是承诺 |
+
+**注意这八条都是账目保证**：保证不丢、不改、可定位、可重算。
+它们不保证任何一条判断写得对，也不保证画像像你。判断准不准只靠你逐条否决，
+代码对这件事完全沉默——`check` 的「0 错误」意思是**账没记错**，不是**人没记错**。
 
 ---
 
@@ -143,7 +149,7 @@ python scripts/init.py
 | `scripts/build.py` | 渲染两个视图 |
 | `scripts/check.py` | 一秒体检 + 坏味道清单 |
 | `scripts/synth.py` | 综述层：写作工作台 + 引用校验 |
-| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍（36 个用例） |
+| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍（38 个用例，约 4 分钟） |
 | `scripts/digest.py` `suggest.py` `tension.py` | 消化债、依据召回、矛盾工作台 |
 | `examples/minimal/` | 起步阶段的完整示例 |
 | `me/` | **你的数据**（被 gitignore，不会提交；但它自己是一个 git 仓） |
@@ -158,6 +164,7 @@ python scripts/commit.py --due          # 今天到期待复核的（一次摆 3
 python scripts/commit.py --drafts       # 校验没过、等你决定怎么改的
 python scripts/commit.py --retire c-013 --reason "…"    # 退役（要理由）
 python scripts/commit.py --retopic c-038:work --reason "归档写错了"
+python scripts/commit.py --narrow c-069 --text "…" --context "…" --reason "原来那句说宽了"  # 标题+说明一起收窄
 python scripts/commit.py --rewire x.json                # 换依据 + 换 context
 python scripts/selftest.py              # 改了 scripts/ 任何一行都要跑
 ```

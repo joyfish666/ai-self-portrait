@@ -553,10 +553,13 @@ def main():
         for icon, head, detail in smells:
             print(f"  {icon} {head} ｜ {detail}")
 
+    note = "ℹ️  本体检只验账目：不验判断真假，不验历史漏记"
     if errors:
         print(f"\n未通过：{len(errors)} 个错误，{len(warns)} 个警告")
+        print(note)
         return 1
     print(f"\n✅ 通过：0 错误，{len(warns)} 个警告")
+    print(note)
     return 0
 
 

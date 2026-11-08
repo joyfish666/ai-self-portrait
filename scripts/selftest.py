@@ -737,6 +737,80 @@ def g7_120条不会退化成分钟级():
     assert cost < 3.0, f"check 用了 {cost:.2f}s，怀疑退化成了平方级"
 
 
+# ---------------------------------------------------------------- 措辞修正
+
+@case
+def 收窄措辞只动text_不造新记录():
+    d = sandbox()
+    seed(d, claims=fx.base_claims()[:1])
+    before = jsonl(d, "claims.jsonl")[0]
+    code, out = run(d, "commit.py", "--narrow", "c-001",
+                    "--text", "干活靠手感，不看钟表",
+                    "--reason", "原话只说了看手感，没提表")
+    assert code == 0, out
+    assert "0 丢失" in out and "1 收窄措辞" in out, out
+    after = jsonl(d, "claims.jsonl")[0]
+    changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
+    assert changed == ["text"], f"只该改 text，却动了 {changed}"
+    assert len(jsonl(d, "claims.jsonl")) == 1, "不该造出新判断"
+    ns = jsonl(d, "narrows.jsonl")
+    assert len(ns) == 1, ns
+    assert ns[0]["old"] == before["text"] and ns[0]["new"] == after["text"], ns
+    assert ns[0]["reason"] == "原话只说了看手感，没提表", ns
+    rev = (d / "me" / "REVISIONS.md").read_text(encoding="utf-8")
+    assert "措辞修正" in rev and before["text"] in rev, rev
+    code2, out2 = run(d, "check.py")
+    assert code2 == 0 and "本体检只验账目" in out2, out2
+
+
+@case
+def 收窄措辞_理由必填_超长不许_退役的不收():
+    d = sandbox()
+    seed(d, claims=fx.base_claims()[:1])
+    code, out = run(d, "commit.py", "--narrow", "c-001", "--text", "再改一次")
+    assert code == 1 and "--reason" in out, out
+    code, out = run(d, "commit.py", "--narrow", "c-001",
+                    "--text", "很" * 50, "--reason", "太长")
+    assert "超 40 字" in out, out
+    assert jsonl(d, "claims.jsonl")[0]["text"] == "干活靠手感，不看表"
+    code, out = run(d, "commit.py", "--narrow", "c-999",
+                    "--text", "随便", "--reason", "试试")
+    assert "找不到这条判断" in out, out
+    code, out = run(d, "commit.py", "--retire", "c-001", "--reason", "不用了")
+    assert code == 0, out
+    code, out = run(d, "commit.py", "--narrow", "c-001",
+                    "--text", "换个说法", "--reason", "试试")
+    assert "不是在役判断" in out, out
+
+
+@case
+def 收窄措辞可连说明一起换_不合格说明被拦():
+    d = sandbox()
+    seed(d, claims=fx.base_claims()[:1])
+    before = jsonl(d, "claims.jsonl")[0]
+    new_ctx = ("他说每天凌晨四点到店里，先发面再烤第一批——"
+               "判断发到什么时候看手感，不看钟表时间，也不提前列计划。")
+    code, out = run(d, "commit.py", "--narrow", "c-001",
+                    "--text", "干活靠手感，不看钟表", "--context", new_ctx,
+                    "--reason", "原话没提表，也没说计划")
+    assert code == 0, out
+    after = jsonl(d, "claims.jsonl")[0]
+    changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
+    assert set(changed) == {"text", "context"}, f"只该动 text/context：{changed}"
+    assert after["context"] == new_ctx, after
+    ns = jsonl(d, "narrows.jsonl")
+    assert ns[0]["old_context"] == before["context"], ns
+    assert ns[0]["new_context"] == new_ctx, ns
+    rev = (d / "me" / "REVISIONS.md").read_text(encoding="utf-8")
+    assert "原说明" in rev and "新说明" in rev, rev
+    bad_ctx = ("这段文字跟原话毫无关系，纯粹是编出来的，用来测试校验会不会把它拦下来，"
+               "不含任何依据里的连续片段。")
+    code, out = run(d, "commit.py", "--narrow", "c-001",
+                    "--text", "再改一次", "--context", bad_ctx, "--reason", "试试")
+    assert "没含依据原话片段" in out, out
+    assert jsonl(d, "claims.jsonl")[0]["text"] == "干活靠手感，不看钟表", "被拦时 text 不该变"
+
+
 def main():
     keep = "--keep" in sys.argv
     started = time.time()
