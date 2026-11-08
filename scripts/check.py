@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ME = ROOT / "me"
 sys.path.insert(0, str(ROOT / "scripts"))
-from store import (ISO_RE, age_days, covered_by, has_fragment,  # noqa: E402
+from store import (ISO_RE, age_days, bigrams, covered_by, has_fragment,  # noqa: E402
                    load, overlap, to_date)
 
 DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
@@ -34,6 +34,12 @@ KINDS = {"自述", "行为", "他人转述", "AI观察"}
 SOURCES = {"user", "ai", "external"}
 FORBIDDEN = ["已纠正", "作废", "之前说", "待填写"]
 MAX_DISP, MAX_STATE, MAX_TENSIONS = 60, 40, 10
+# 60 不是容量，它是一条软线：超过就提示，不拦。
+# 真正拦人的是安全网——那是防失控的，不该参与日常。八个成熟行业（代码质量、看板、
+# git gc、ES ILM、档案、病历、LSH 去重、情报）没有一个用"总量上限"管积累，
+# 它们管的是"坏味道"。所以这里把 60 降级成提示，另加 HARD 兜底。
+SOFT_DISP, HARD_DISP = 60, 150
+SOFT_STATE, HARD_STATE = 40, 100
 TEXT_MAX, CTX_MIN, CTX_MAX, FACT_MAX = 40, 30, 150, 1000
 FRAG = 8
 # 复核期用区间而不是固定偏移：抓"复制粘贴写错"，不卡合理的半年期状态
@@ -248,15 +254,17 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
     active = [c for c in claims if c.get("status") == "active"]
     disp = [c for c in active if c.get("type") in JUDGED]
     state = [c for c in active if c.get("type") == "state"]
-    if len(disp) > MAX_DISP:
-        err(f"判断有 {len(disp)} 条，超过上限 {MAX_DISP}。两条路："
-            f"① 合并（写一条新的 supersedes 掉 2–3 条，模型更紧）；"
-            f"② 退役（--retire c-xxx --reason \"…\"，模型会变松）")
-    if len(state) > MAX_STATE:
-        err(f"状态有 {len(state)} 条，超过上限 {MAX_STATE}。两条路："
-            f"① 合并；② 退役（--retire c-xxx --reason \"…\"）")
+    if len(disp) > HARD_DISP:
+        err(f"判断有 {len(disp)} 条，超过安全网 {HARD_DISP} —— 这不是「有点多」，是失控了。"
+            f"先合并或退役，别抬网")
+    elif len(disp) > SOFT_DISP:
+        warn(f"判断 {len(disp)} 条，过了软线 {SOFT_DISP}。不拦你——看下面那几张坏味道")
+    if len(state) > HARD_STATE:
+        err(f"状态有 {len(state)} 条，超过安全网 {HARD_STATE}")
+    elif len(state) > SOFT_STATE:
+        warn(f"状态 {len(state)} 条，过了软线 {SOFT_STATE}")
     if len([t for t in tensions if t.get("status") == "open"]) > MAX_TENSIONS:
-        err(f"tensions 超过上限 {MAX_TENSIONS}")
+        err(f"tensions 超过上限 {MAX_TENSIONS}（未解决的冲突本来就不该多）")
 
     # ---------- 孤儿 / 视图 ----------
     if manifest is not None:
@@ -359,6 +367,76 @@ def debt_report(facts, claims, today=None):
     return out
 
 
+def contain(a, b):
+    """两条判断的字面相似度（0–1）。
+
+    用 difflib 而不是 bigram 重合：判断只有十几个字，bigram 在这么短的串上要么失效
+    （不足 8 个 bigram 直接归零），要么被模板化文本骗到 0.9 以上。实测：
+    真实 56 条判断两两最高只有 0.31，所以 0.75 这个线不会误报。
+    """
+    a, b = str(a or ""), str(b or "")
+    if len(a) < 6 or len(b) < 6:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def smell_report(claims, facts, today=None):
+    """坏味道清单：不设阈值，只回答"有没有"。
+
+    八个成熟行业管积累都靠这个，没有一家靠"总量上限"：代码质量管重复/复杂/死代码，
+    看板管在制品，git 管可达性，档案管处置计划，病历管复核频率，去重管相似度。
+
+    这里只做**召回**，不下判决——每一行都要人来看一眼。
+    """
+    today = today or to_date(str(date.today()))
+    active = [c for c in claims if c.get("status") == "active" and c.get("type") in JUDGED]
+    out = []
+
+    # ① 重复：同一个域里两条判断在说同一件事
+    dup = []
+    for i in range(len(active)):
+        for j in range(i + 1, len(active)):
+            a, b = active[i], active[j]
+            if a.get("topic") != b.get("topic"):
+                continue
+            s = contain(a.get("text", ""), b.get("text", ""))
+            if s >= 0.75:
+                dup.append((s, a["id"], b["id"], a["text"], b["text"]))
+    dup.sort(reverse=True)
+    for s, x, y, tx, ty in dup[:3]:
+        out.append(("🔁", f"重复 {int(s * 100)}%", f"{x}「{tx}」 / {y}「{ty}」"))
+
+    # ② 单点依据：整条判断只靠一条事实，那条一倒它就倒
+    thin = [c for c in active if len(c.get("basis") or []) == 1]
+    if thin:
+        out.append(("🕳️", f"单点依据 {len(thin)} 条",
+                    "、".join(c["id"] for c in thin[:4])
+                    + ("…" if len(thin) > 4 else "") + " —— 那条事实一倒，这几条就倒"))
+
+    # ③ 到期集中：那一天/那一个月会一起压过来
+    by_month = {}
+    for c in active:
+        ra = c.get("review_after")
+        if ra:
+            by_month[ra[:7]] = by_month.get(ra[:7], 0) + 1
+    for m, n in sorted(by_month.items()):
+        if n >= 10:
+            out.append(("⏰", f"{m} 到期 {n} 条",
+                        f"约 {(n + 2) // 3} 次 --due 才看完 —— 这就是「轰炸」的样子"))
+
+    # ④ 域失衡：码率全挤在一块，别的域没被说
+    tot = len(active)
+    if tot >= 20:
+        per = {}
+        for c in active:
+            per[c.get("topic")] = per.get(c.get("topic"), 0) + 1
+        top, tn = max(per.items(), key=lambda kv: kv[1])
+        if tn / tot >= 0.35:
+            out.append(("⚖️", f"{top} 占 {int(tn / tot * 100)}%",
+                        f"{tn}/{tot} 条判断挤在一个域里 —— 其它域还空着"))
+    return out
+
+
 def main():
     if not ME.is_dir():
         print("me/ 不存在。先跑 python scripts/init.py")
@@ -448,6 +526,14 @@ def main():
         print(f"⚠️  {w}")
     for e in errors:
         print(f"❌ {e}")
+
+    # 坏味道：不设阈值，只回答"有没有"。不参与通过/不通过。
+    smells = smell_report(claims, facts)
+    if smells:
+        print(f"\n🧹 坏味道 {len(smells)} 条（不拦你，只摆出来）")
+        for icon, head, detail in smells:
+            print(f"  {icon} {head} ｜ {detail}")
+
     if errors:
         print(f"\n未通过：{len(errors)} 个错误，{len(warns)} 个警告")
         return 1

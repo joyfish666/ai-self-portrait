@@ -24,7 +24,9 @@
 
 闸门（不合格就不进正式层）
     - 校验不过 → 进 me/drafts.jsonl，不丢
-    - 超上限（判断 60 / 状态 40 / 张力 10）→ 整批拒绝，什么都不写
+    - 和同域已有判断几乎一样（≥92%）→ 进草稿，先想清楚是不是同一件事
+    - 超过安全网（判断 150 / 状态 100 / 张力 10）→ 整批拒绝
+    - 判断 60 / 状态 40 只是**软线**：过了会提示，不拦
 """
 import argparse
 import json
@@ -224,6 +226,20 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
             return draft(drafts, rc, "claim_draft", raw, "in_tension",
                          f"{open_t[0]} 还挂着要取代的判断 —— 先 tension.py --close {open_t[0]} --reason …")
 
+    # 新增要给理由（病历 Problem List 的做法：加一条，要么解决旧条目，要么说明为什么不能）。
+    # 落库之前先比一次"同域最像的那条"——高度重合说明它不是一条新的，是旧的一条的另一种说法。
+    twin = (0.0, "", "")
+    for o in claims:
+        if o.get("status") != "active" or o.get("topic") != c.get("topic"):
+            continue
+        s = check_mod.contain(c.get("text", ""), o.get("text", ""))
+        if s > twin[0]:
+            twin = (s, o["id"], o.get("text", ""))
+    if twin[0] >= 0.92:
+        return draft(drafts, rc, "claim_draft", raw, "duplicate_claim",
+                     f"和 {twin[1]}「{clean(twin[2], 24)}」重合 {int(twin[0] * 100)}%"
+                     f" —— 合进那条，或者把区别说清楚")
+
     c["id"] = next_id(claims, "c", 3)
     c["status"] = "active"
     c.setdefault("ambiguous", False)
@@ -246,6 +262,10 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
     if downgraded:
         note += "（ai 不能 confirmed，已降为 inferred）"
     rc.add("✅", c["id"], "新增判断", note)
+
+    if 0.75 <= twin[0] < 0.92:
+        rc.add("⚠️", c["id"], f"和 {twin[1]} 像 {int(twin[0] * 100)}%",
+               "两条都在说这件事吗？是的话合并，不是就把区别写进 context")
 
     # 话别说得比证据远：依据全来自"干活现场"（kind=行为），判断却落在生活域
     if c.get("topic") not in ("work", "interface", "misc"):

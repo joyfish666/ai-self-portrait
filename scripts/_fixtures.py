@@ -35,13 +35,23 @@ def base_claims():
     ]
 
 
+_FILLER = ["先发面", "看炉温", "记时间", "洗模具", "称面粉", "擦案板", "换烤纸", "调湿度"]
+
+
 def bulk_claims(n, start=0, fact_text="每天凌晨四点到店里"):
-    """n 条互不相同的占位判断：用来测上限和耗时，不参与语义断言。"""
+    """n 条互不相同的占位判断：用来测上限和耗时，不参与语义断言。
+
+    text 里叠了三处会变的填充词，是为了让两两字面相似度低于「重复」的门槛：
+    占位数据如果长得太像，会被 commit 的重合检查当成重复打回草稿。
+    """
     out = []
     for i in range(start, start + n):
+        f1 = _FILLER[i % 8]
+        f2 = _FILLER[(i // 8) % 8]
+        f3 = _FILLER[(i // 64) % 8]
         out.append({
             "topic": "work", "type": "disposition",
-            "text": f"占位判断第{i}号，讲工作里的第{i}种情形",
+            "text": f"占位第{i}号：{f1}、{f2}、{f3}这三件事，只为凑数",
             "context": f"他说{fact_text}，先发面再烤第一批——这是第{i}条占位说明，只为凑数量和耗时。",
             "source": "ai", "confidence": "inferred", "basis": ["f-0001"],
         })

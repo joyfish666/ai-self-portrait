@@ -139,17 +139,55 @@ def g2_手改视图会被抓():
 
 
 @case
-def g6_第61条整批拒绝():
+def g6_过软线不拦_过安全网才拦():
     d = sandbox()
     seed(d, facts=fx.base_facts(TODAY)[:1], claims=[])
     put(d, "bulk.json", fx.bulk_claims(60))
     code, out = run(d, "commit.py", "--claims", "bulk.json")
     assert code == 0, out
     assert len(jsonl(d, "claims.jsonl")) == 60
+    # 第 61 条不再整批拒绝：60 是软线，只提示
     put(d, "one.json", fx.bulk_claims(1, start=60))
     code, out = run(d, "commit.py", "--claims", "one.json")
-    assert code == 1 and "超过上限" in out, out
-    assert len(jsonl(d, "claims.jsonl")) == 60, "拒绝时不该写入任何东西"
+    assert code == 0, f"过了软线不该拦：\n{out}"
+    assert len(jsonl(d, "claims.jsonl")) == 61
+    # 但安全网还在：150 条之后必须拒绝
+    rows = fx.bulk_claims(150)
+    for i, r in enumerate(rows):
+        r["id"] = f"c-{i + 1:03d}"
+        r["since"] = TODAY
+        r["review_after"] = (date.today() + timedelta(days=365)).isoformat()
+        r["supersedes"] = []
+        r["status"] = "active"
+    (d / "me" / "claims.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    put(d, "one2.json", fx.bulk_claims(1, start=999))
+    code, out = run(d, "commit.py", "--claims", "one2.json")
+    assert code == 1 and "安全网" in out, out
+
+
+@case
+def 和已有判断几乎一样会打回草稿():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())          # c-001「干活靠手感，不看表」
+    put(d, "c.json", [{"topic": "work", "type": "disposition",
+                       "text": "干活靠手感，不看钟表",
+                       "context": "他说每天凌晨四点到店里，先发面再烤第一批——看手感，不看时间。",
+                       "source": "ai", "confidence": "inferred", "basis": ["f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c.json")
+    assert code == 0, out
+    assert "1 进草稿" in out, f"和已有判断一模一样的，该回草稿：\n{out}"
+    assert "重合" in out, out
+
+
+@case
+def 坏味道会摆出来但不影响通过():
+    d = sandbox()
+    seed(d, claims=fx.base_claims())          # 三条判断各只有一条依据
+    code, out = run(d, "check.py")
+    assert code == 0, f"坏味道不参与通过/不通过：\n{out}"
+    assert "单点依据" in out, f"三条判断各一条依据，该摆出来：\n{out}"
+    assert "只摆出来" in out, out
 
 
 @case
