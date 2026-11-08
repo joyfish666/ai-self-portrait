@@ -406,12 +406,21 @@ def smell_report(claims, facts, today=None):
     for s, x, y, tx, ty in dup[:3]:
         out.append(("🔁", f"重复 {int(s * 100)}%", f"{x}「{tx}」 / {y}「{ty}」"))
 
-    # ② 单点依据：整条判断只靠一条事实，那条一倒它就倒
+    # ② 单点依据：整条判断只靠一条事实。但要分清"脆"和"不脆"——
+    # 依据是「自述」的，多半是旧数据里压缩过的摘要，回不到原话核对，那条一更正就悬空；
+    # 依据是「行为」的，本身就是逐字原话，只有一条也不算脆（随时能重读一遍）。
+    byid = {f.get("id"): f for f in (facts or [])}
     thin = [c for c in active if len(c.get("basis") or []) == 1]
     if thin:
-        out.append(("🕳️", f"单点依据 {len(thin)} 条",
-                    "、".join(c["id"] for c in thin[:4])
-                    + ("…" if len(thin) > 4 else "") + " —— 那条事实一倒，这几条就倒"))
+        soft = [c for c in thin if (byid.get(c["basis"][0]) or {}).get("kind") == "自述"]
+        hard = len(thin) - len(soft)
+        bits = (f"{len(soft)} 条的依据是「自述」——旧数据里这类被压成了摘要，"
+                f"回不到原话核对，那条一被更正它就悬空")
+        if hard:
+            bits += f"；{hard} 条的依据是「行为」，本身就是逐字原话，不算脆"
+        if soft:
+            bits += "（" + "、".join(c["id"] for c in soft[:3]) + "…）"
+        out.append(("🕳️", f"单点依据 {len(thin)} 条", bits))
 
     # ③ 到期集中：那一天/那一个月会一起压过来
     by_month = {}
