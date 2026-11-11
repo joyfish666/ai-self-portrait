@@ -50,8 +50,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import build as build_mod          # noqa: E402
 import check as check_mod          # noqa: E402
-from store import (add_days, age_days, atomic_write, covered_by, dump_jsonl,  # noqa: E402
-                   has_fragment, is_choice_code, load, load_any, next_id, today_iso, to_date)
+from store import (FRAG, add_days, age_days, atomic_write, covered_by,  # noqa: E402
+                   dump_jsonl, has_fragment, is_choice_code, load, load_any,
+                   next_id, today_iso, to_date)
 
 JUDGED = ("disposition", "inference")
 TYPES = {"constant", "state", "disposition", "inference"}
@@ -586,10 +587,20 @@ def capture_said(rows, transcript, events, round_no, actor):
 
 
 def migrate_legacy(claims, transcript, events, migrations, rc):
-    """把迁移前的自报值固化成豁免名单，并清掉派生字段。幂等。"""
-    if any(m.get("kind") == "legacy" for m in migrations):
+    """把迁移前的自报值固化成豁免名单。幂等：缺什么补什么。"""
+    short = [t["id"] for t in transcript
+             if len("".join(str(t.get("text", "")).split())) < FRAG
+             and not t.get("ignored")]
+    legacy = next((m for m in migrations if m.get("kind") == "legacy"), None)
+    if legacy is not None:
         rc.count_input()
-        rc.add("➖", "migrate", "已经迁过，不重复写")
+        if "short_said" not in legacy:
+            legacy["short_said"] = short
+            reason = "迁移前的短句原话固化进豁免名单：新规则不按字数免检，老数据不追诉"
+            append_event(events, "migration", "legacy-short", reason, "system")
+            rc.add("✅", "migrate", "补齐短句豁免名单", f"固化 {len(short)} 句短原话")
+        else:
+            rc.add("➖", "migrate", "已经迁过，不重复写")
         return
     confirmed = [c["id"] for c in claims
                  if c.get("status") == "active" and c.get("confidence") == "confirmed"]
@@ -602,14 +613,14 @@ def migrate_legacy(claims, transcript, events, migrations, rc):
         for k in ("renewed_at", "renewed_reason"):
             c.pop(k, None)
     row = {"kind": "legacy", "at": today_iso(),
-           "confirmed": confirmed, "ignored": ignored,
+           "confirmed": confirmed, "ignored": ignored, "short_said": short,
            "reason": "迁移前历史：confirmed / ignored 由提交方自报，无独立事件；此后新写入必须有事件"}
     migrations.append(row)
     append_event(events, "migration", "legacy", row["reason"], "system")
     rc.count_input()
     rc.add("✅", "migrate", "存量迁移",
-           f"固化 {len(confirmed)} 条 confirmed / {len(ignored)} 句 ignored；"
-           f"清掉 {dropped} 个 review_after")
+           f"固化 {len(confirmed)} 条 confirmed / {len(ignored)} 句 ignored / "
+           f"{len(short)} 句短原话；清掉 {dropped} 个 review_after")
 
 
 def retopic_claim(spec, reason, claims, rc):
@@ -1079,8 +1090,8 @@ def main():
         return 0
 
     # 决定不可静默：本轮交上来的每句原话都要有终态。
-    # 终态只有三种：落成事实、被 --ignore 显式标为不记、短到不构成内容。
-    # 没有终态就整批拒绝——「0 句没落地」不再是标个 ignored 就能刷出来的。
+    # 终态只有两种：落成事实、被 --ignore 显式标为不记。
+    # 不按字数免检：短回答也要有交代，否则漏记一句也报「0 句没落地」。
     fact_texts = [f["text"] for f in facts if not f.get("excluded")]
     ignored_ids = {e.get("target") for e in events if e.get("kind") == "ignore"}
     legacy_ignored = set()
@@ -1092,7 +1103,7 @@ def main():
             or s.get("id") in legacy_ignored
 
     def unsettled(s):
-        if is_ignored(s) or len("".join(s.get("text", "").split())) < 8:
+        if is_ignored(s):
             return False
         return not covered_by(s.get("text", ""), fact_texts)
 
@@ -1107,12 +1118,10 @@ def main():
         print('   落成事实，或 --ignore <id> --reason "…"。')
         return 1
 
-    cov = {"landed": 0, "ignored": 0, "short": 0, "missing": []}
+    cov = {"landed": 0, "ignored": 0, "missing": []}
     for s in target:
         if is_ignored(s):
             cov["ignored"] += 1
-        elif len("".join(s["text"].split())) < 8:
-            cov["short"] += 1
         elif covered_by(s["text"], fact_texts):
             cov["landed"] += 1
         else:
@@ -1138,7 +1147,7 @@ def main():
     lost = rc.print()
     if target:
         print(f"\n你说 {len(target)} 句 ｜ {cov['landed']} 句落地 ｜ "
-              f"{cov['ignored']} 句标为无价值 ｜ {cov['short']} 句太短 ｜ "
+              f"{cov['ignored']} 句标为无价值 ｜ "
               f"{len(cov['missing'])} 句没落地")
         for s in cov["missing"][:3]:
             print(f"   ⚠️ 没落地：{clean(s['text'], 40)}")

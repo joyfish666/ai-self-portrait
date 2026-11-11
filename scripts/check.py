@@ -502,9 +502,15 @@ def main():
                 break
 
     # 原话覆盖：你说过的话，有没有一句没落到事实上
+    # 迁移前的历史短句固化在 legacy.short_said 名单里，只对这份写死的名单豁免
+    legacy_short = set()
+    for m in migrations:
+        if m.get("kind") == "legacy":
+            legacy_short.update(m.get("short_said") or [])
     live_texts = [f["text"] for f in facts if not f.get("excluded")]
     missing = [s for s in transcript
-               if not s.get("ignored") and not covered_by(s.get("text", ""), live_texts)]
+               if not s.get("ignored") and s.get("id") not in legacy_short
+               and not covered_by(s.get("text", ""), live_texts)]
     if missing:
         warns.append(f"{len(missing)} 句你说的话没落到任何事实（{missing[0].get('id')} 起）"
                      f"—— 看看是漏记，还是该标 ignored")

@@ -113,14 +113,19 @@ def age_text(days):
     return f"{days // 365}年前"
 
 
-def covered_by(text, fact_texts, min_len=FRAG):
-    """这句话有没有落到某条事实上：短的一方要够长，且互为子串。"""
+def covered_by(text, fact_texts):
+    """这句话有没有落到某条事实上：去空白后互为子串即可。
+
+    不按长度免检。以前短于 8 字一律算「已落地」，本意是跳过「嗯」这类语气词，
+    却有内容的短回答（选项文字常常 3–12 字）没落地也报「0 句没落地」。
+    空文本没有内容可追，单独放行，避免空串被当成任何事实的子串。
+    """
     t = "".join(str(text).split())
-    if len(t) < min_len:
-        return True          # 太短，本来就不是内容
+    if not t:
+        return True
     for ft in fact_texts:
         f = "".join(str(ft).split())
-        if len(f) >= min_len and (f in t or t in f):
+        if f and (f in t or t in f):
             return True
     return False
 

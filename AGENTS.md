@@ -240,9 +240,9 @@ python scripts/commit.py --retopic c-938:work --reason "归档写错了"
 
 ```bash
 python scripts/commit.py --narrow c-969 \
-    --text '把执行类工作看得很轻，更看重"想出方案"' \
+    --text '更看重把做法定下来的人，不太看重照着做' \
     --context '他说揉面、上架、收银"谁干都行，不差我一个"——是说自己该干别的，不是说这些活不算活。' \
-    --reason '"只认"是推断，原话只说了相对不贵'
+    --reason '"不太看重"是推断，原话只说了不差我一个'
 ```
 
 说宽了的话常常**同时写在 `text` 和 `context` 里**，标题和说明要一起换（`--context` 可选，

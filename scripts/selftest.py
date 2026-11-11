@@ -178,8 +178,18 @@ def unit_片段校验_必须真含连续八字():
     from store import covered_by, has_fragment
     assert has_fragment("他说每天凌晨四点到店里先发面", "每天凌晨四点到店里，先发面再烤第一批")
     assert not has_fragment("完全不相干的一句话", "每天凌晨四点到店里，先发面再烤第一批")
-    assert covered_by("嗯", [])                    # 少于 8 字，本来就不追究
     assert not covered_by("这句话真的完全没有落到任何一条事实上面", ["别的原话"])
+
+
+@unit
+def unit_短答不再免检():
+    """有内容的短回答漏记时，必须能被看出来。全是虚构数据。"""
+    from store import covered_by
+    assert not covered_by("在家补觉", []), "短句没落地不能再算已交代"
+    assert not covered_by("在家补觉", ["骑车去河边坐着"])
+    assert covered_by("在家补觉", ["在家补觉"]), "事实正文同样短也要能匹配上"
+    assert covered_by("在家补觉", ["今天在家补觉，什么也没安排"])
+    assert covered_by("", []), "空文本没有内容可追"
 
 
 @unit
@@ -504,6 +514,50 @@ def 和已有判断几乎一样会打回草稿():
     assert code == 0, out
     assert "1 进草稿" in out, f"和已有判断一模一样的，该回草稿：\n{out}"
     assert "重合" in out, out
+
+
+@case
+def 短答_没终态整批拒绝():
+    """短回答不再免检：漏记一句就得整批停下来。全是虚构数据。"""
+    d = sandbox()
+    put(d, "said.json", ["在家补觉"])
+    code, out = run(d, "commit.py", "--capture", "said.json")
+    assert code == 0, out
+    code, out = run(d, "commit.py", "--from-capture", "1")
+    assert code == 1, out
+    assert "没有终态" in out, out
+    assert jsonl(d, "facts.jsonl") == [], "短答漏记时什么都不该写"
+
+
+@case
+def 短答_落了事实就算有交代():
+    d = sandbox()
+    put(d, "said.json", ["在家补觉"])
+    code, out = run(d, "commit.py", "--capture", "said.json")
+    assert code == 0, out
+    put(d, "f.json", [{"date": TODAY, "kind": "自述",
+                       "asked": "空下来的一下午怎么过", "text": "在家补觉",
+                       "topic": "leisure", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json", "--from-capture", "1")
+    assert code == 0, out
+    assert "你说 1 句" in out and "1 句落地" in out, out
+    assert "太短" not in out, out
+    assert len(jsonl(d, "facts.jsonl")) == 1
+
+
+@case
+def 短答_显式不记也算终态():
+    d = sandbox()
+    put(d, "said.json", ["在家补觉"])
+    code, out = run(d, "commit.py", "--capture", "said.json")
+    assert code == 0, out
+    sid = jsonl(d, "transcript.jsonl")[0]["id"]
+    code, out = run(d, "commit.py", "--ignore", sid,
+                    "--reason", "纯日常，没有判断价值")
+    assert code == 0, out
+    code, out = run(d, "commit.py", "--from-capture", "1")
+    assert code == 0, out
+    assert "1 句标为无价值" in out and "0 句没落地" in out, out
 
 
 @case
