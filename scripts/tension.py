@@ -14,7 +14,9 @@
 """
 import json
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -23,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 ME = ROOT / "me"
 sys.path.insert(0, str(ROOT / "scripts"))
-from store import dump_jsonl, load, today_iso  # noqa: E402
+from store import load  # noqa: E402
 
 DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
            "health", "relations", "leisure"]
@@ -33,8 +35,20 @@ NAME = {"identity": "身份", "work": "职业", "methods": "方法", "goals": "�
 JUDGED = ("disposition", "inference")
 
 
-def save(name, rows):
-    dump_jsonl(ME / name, rows)
+COMMIT = Path(__file__).resolve().parent / "commit.py"
+
+
+def call_commit(*argv):
+    """写入只走 commit.py：它负责校验、重建视图、体检、提交内层仓。
+
+    以前 --add / --close 自己 dump_jsonl，绕过了唯一写入路径——写进去的张力
+    不会进 events、不会重算视图，也不会被 check 抓到（manifest 只看 claims 的 id）。
+    """
+    r = subprocess.run([sys.executable, str(COMMIT), *argv], cwd=str(ROOT),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    print(((r.stdout or "") + (r.stderr or "")).strip())
+    return r.returncode
 
 
 def bigrams(t):
@@ -87,52 +101,30 @@ def main() -> int:
         flag = "--close" if "--close" in args else "--reopen"
         i = args.index(flag)
         tid = args[i + 1] if len(args) > i + 1 else ""
-        t = next((x for x in tensions if x.get("id") == tid), None)
-        if not t:
-            print(f"❌ 没找到 {tid}")
+        if not tid:
+            print(f"❌ 用法：{flag} t-001")
             return 1
         if flag == "--close":
-            if "--reason" in args:
-                reason = args[args.index("--reason") + 1]
-            else:
-                reason = ""
+            reason = args[args.index("--reason") + 1] if "--reason" in args else ""
             if not reason:
                 print("❌ 关闭张力要写 --reason（这条张力是怎么收场的）")
                 return 1
-            t["status"] = "closed"
-            t["closed_reason"] = reason
-            t["closed_at"] = today_iso()
-            print(f"✅ 关闭 {tid}：{reason}")
-        else:
-            t["status"] = "open"
-            t.pop("closed_reason", None)
-            t.pop("closed_at", None)
-            print(f"✅ 重新打开 {tid}")
-        save("tensions.jsonl", tensions)
-        return 0
+            return call_commit("--close-tension", tid, "--reason", reason)
+        return call_commit("--reopen-tension", tid)
 
     if "--add" in args:
         i = args.index("--add")
+        if len(args) < i + 4:
+            print('❌ 用法：--add c-001 c-002 "描述"')
+            return 1
         a, b, desc = args[i + 1], args[i + 2], args[i + 3]
-        for x in (a, b):
-            if x not in by_id:
-                print(f"❌ {x} 不存在或非活跃")
-                return 1
-        if a == b:
-            print("❌ 两条判断不能是同一条")
-            return 1
-        if not (5 <= len(desc) <= 100):
-            print(f"❌ 描述 {len(desc)} 字，应 5–100 字")
-            return 1
-        if any(set(t.get("between", [])) == {a, b} for t in tensions):
-            print("这对已经有矛盾记录了")
-            return 1
-        tid = f"t-{len(tensions)+1:03d}"
-        tensions.append({"id": tid, "between": [a, b], "desc": desc,
-                         "since": today_iso(), "status": "open"})
-        save("tensions.jsonl", tensions)
-        print(f"✅ 新增 {tid}：{desc}")
-        return 0
+        fd, path = tempfile.mkstemp(suffix=".json", prefix="tension_")
+        try:
+            with open(fd, "w", encoding="utf-8") as fh:
+                json.dump([{"between": [a, b], "desc": desc}], fh, ensure_ascii=False)
+            return call_commit("--tensions", path)
+        finally:
+            Path(path).unlink(missing_ok=True)
 
     if "--worksheet" in args or not args:
         print("按域摆出全部判断。逐对问：**这两条会不会拉着人往相反方向走？**\n")

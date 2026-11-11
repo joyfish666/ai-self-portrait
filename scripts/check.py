@@ -20,8 +20,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ME = ROOT / "me"
 sys.path.insert(0, str(ROOT / "scripts"))
-from store import (ISO_RE, age_days, bigrams, covered_by, has_fragment,  # noqa: E402
-                   load, overlap, to_date)
+from store import (ISO_RE, SENSITIVE, age_days, bigrams, covered_by,  # noqa: E402
+                   has_fragment, load, overlap, to_date)
 
 DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
            "health", "relations", "leisure"]
@@ -63,7 +63,7 @@ def valid_topic(t):
 
 def validate(facts, claims, tensions, drafts, *, manifest=None,
              require_rendered=True, check_views=True, today=None, topics=None,
-             events=None, migrations=None, transcript=None):
+             events=None, migrations=None, transcript=None, state=None):
     """返回 (errors, warns)。commit.py 用 require_rendered=False 预检。"""
     errors, warns = [], []
     today = today or date.today().isoformat()
@@ -103,6 +103,8 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
                 err(f"fact {i} 缺字段 {k}")
         if not _is_iso(f.get("date")):
             err(f"fact {i} date 不是 YYYY-MM-DD：{f.get('date')!r}")
+        elif (f.get("date") or "") > today:
+            err(f"fact {i} 的 date 在未来（{f.get('date')}）—— 记的不是已发生的事？")
         if f.get("kind") not in KINDS:
             err(f"fact {i} kind 非法：{f.get('kind')}")
         if "triage" in f:
@@ -163,6 +165,8 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
         # 统一在下面的「事件化」一节校验。
         if not _is_iso(c.get("since")):
             err(f"claim {i} since 不是 YYYY-MM-DD：{c.get('since')!r}")
+        elif (c.get("since") or "") > today:
+            err(f"claim {i} 的 since 在未来（{c.get('since')}）")
 
         # 依据有效性：被引用为 noise 是错误；只引用了已排除的事实是警告
         src_text = "".join(fid[b]["text"] for b in basis if b in fid)
@@ -259,16 +263,16 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
     # ---------- 数量 ----------
     active = [c for c in claims if c.get("status") == "active"]
     disp = [c for c in active if c.get("type") in JUDGED]
-    state = [c for c in active if c.get("type") == "state"]
+    states = [c for c in active if c.get("type") == "state"]
     if len(disp) > HARD_DISP:
         err(f"判断有 {len(disp)} 条，超过安全网 {HARD_DISP} —— 这不是「有点多」，是失控了。"
             f"先合并或退役，别抬网")
     elif len(disp) > SOFT_DISP:
         warn(f"判断 {len(disp)} 条，过了软线 {SOFT_DISP}。不拦你——看下面那几张坏味道")
-    if len(state) > HARD_STATE:
-        err(f"状态有 {len(state)} 条，超过安全网 {HARD_STATE}")
-    elif len(state) > SOFT_STATE:
-        warn(f"状态 {len(state)} 条，过了软线 {SOFT_STATE}")
+    if len(states) > HARD_STATE:
+        err(f"状态有 {len(states)} 条，超过安全网 {HARD_STATE}")
+    elif len(states) > SOFT_STATE:
+        warn(f"状态 {len(states)} 条，过了软线 {SOFT_STATE}")
     if len([t for t in tensions if t.get("status") == "open"]) > MAX_TENSIONS:
         err(f"tensions 超过上限 {MAX_TENSIONS}（未解决的冲突本来就不该多）")
 
@@ -280,11 +284,21 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
             err(f"有 {len(miss)} 条 active claim 不在上次 build 的视图里："
                 f"{sorted(miss)[:5]} …（先 build 再 check）")
         if check_views:
-            for name in VIEWS:
-                want = (manifest.get("views") or {}).get(name)
-                got = _hash(ME / name)
-                if want and got != want:
-                    err(f"{name} 和 build 产物不一致（被手改过？）—— 跑 build.py 覆盖")
+            # 不是比「视图文件 == manifest 里记的哈希」——那只抓得到手改，抓不到
+            # 「改了数据没 build」：manifest 自己就是上次 build 写的，两边一起旧。
+            # 这里现场从数据重新渲染一遍，和磁盘上的文件逐字比。
+            import build as build_mod
+            want = {
+                "PORTRAIT.md": build_mod.render_portrait(claims, tensions, today,
+                                                         state or {}, topics),
+                "CONTEXT.md": build_mod.render_context(claims, tensions, today, facts),
+            }
+            for name, expected in want.items():
+                p = ME / name
+                got = p.read_text(encoding="utf-8") if p.exists() else None
+                if got != expected:
+                    err(f"{name} 和从当前数据重新渲染的结果不一致"
+                        f"（改了数据没 build，或被手改）—— 跑 build.py 覆盖")
 
     # ---------- 警告级 ----------
     # 注意：`asked` 覆盖率不在这里查——它要"只盯接入之后的事实"，需要 rounds 数据，
@@ -331,14 +345,6 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
         warn("已有 ≥10 条判断但 tensions 为 0——可能漏了矛盾检测")
 
     return errors, warns
-
-
-def _hash(path):
-    import hashlib
-    p = Path(path)
-    if not p.exists():
-        return None
-    return hashlib.md5(p.read_bytes()).hexdigest()[:8]
 
 
 def cited_by_active(claims):
@@ -461,27 +467,39 @@ def main():
         print("me/ 不存在。先跑 python scripts/init.py")
         return 1
 
-    facts, claims = load("facts.jsonl"), load("claims.jsonl")
-    tensions, drafts = load("tensions.jsonl"), load("drafts.jsonl")
-    transcript, rounds = load("transcript.jsonl"), load("rounds.jsonl")
-    topics = load("topics.jsonl")
-    events = load("events.jsonl")
-    migrations = load("migrations.jsonl")
+    try:
+        facts, claims = load("facts.jsonl"), load("claims.jsonl")
+        tensions, drafts = load("tensions.jsonl"), load("drafts.jsonl")
+        transcript, rounds = load("transcript.jsonl"), load("rounds.jsonl")
+        topics = load("topics.jsonl")
+        events = load("events.jsonl")
+        migrations = load("migrations.jsonl")
+    except ValueError as e:
+        print(f"❌ {e}")
+        print("   修好那一行再跑；或从内层仓回滚：git -C me checkout -- <文件>")
+        return 1
     bj = ME / ".build.json"
     manifest = json.loads(bj.read_text(encoding="utf-8")) if bj.exists() else None
 
-    errors, warns = validate(facts, claims, tensions, drafts, manifest=manifest,
-                             topics=topics, events=events, migrations=migrations,
-                             transcript=transcript)
-
-    # 当前域被跳过/暂缓了，但 state 还指着它
-    cur = None
+    # state 也要读：视图里的轮次号和 CONTEXT 的渲染都依赖它，重新渲染得用同一份
+    state, cur = None, None
     sp = ME / "state.json"
     if sp.exists():
         try:
-            cur = json.loads(sp.read_text(encoding="utf-8")).get("current_topic")
+            state = json.loads(sp.read_text(encoding="utf-8"))
+            cur = state.get("current_topic")
         except json.JSONDecodeError:
-            cur = None
+            state, cur = None, None
+
+    errors, warns = validate(facts, claims, tensions, drafts, manifest=manifest,
+                             topics=topics, events=events, migrations=migrations,
+                             transcript=transcript, state=state)
+
+    if (ME / ".pending.json").exists():
+        errors.append("me/.pending.json 还在：上次写盘被打断，文件可能停在半路 —— "
+                      "跑 commit.py --recover 回滚，或确认没问题后删掉它")
+
+    # 当前域被跳过/暂缓了，但 state 还指着它
     for t in topics:
         if t.get("domain") != cur:
             continue
@@ -491,15 +509,18 @@ def main():
             warns.append(f"当前域 {cur} 在暂缓期（到 {t.get('until')}）—— 换下一域")
         break
 
-    # 敏感串：邮箱/手机号一旦进了 me/，就是在本地埋了个雷
+    # 敏感串：邮箱/手机号一旦进了 me/，就是在本地埋了个雷。
+    # 两种都盯——以前只扫邮箱，原话里留个手机号，check 一声不响。
     for name, rows in (("facts", facts), ("claims", claims), ("transcript", transcript)):
-        for r in rows:
-            blob = " ".join(str(r.get(k, "")) for k in ("text", "context", "asked"))
-            got = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", blob)
-            if got:
-                warns.append(f"{name} 的 {r.get('id')} 里有邮箱（{got[0]}）"
+        for rx, label in SENSITIVE:
+            hit = next(((r.get("id"), rx.findall(blob)[0])
+                        for r in rows
+                        for blob in [" ".join(str(r.get(k, ""))
+                                              for k in ("text", "context", "asked"))]
+                        if rx.search(blob)), None)
+            if hit:
+                warns.append(f"{name} 的 {hit[0]} 里有{label}（{hit[1]}）"
                              f" —— 用 commit.py --redact 遮掉，别让它跟着备份或同步跑出去")
-                break
 
     # 原话覆盖：你说过的话，有没有一句没落到事实上
     # 迁移前的历史短句固化在 legacy.short_said 名单里，只对这份写死的名单豁免
@@ -552,12 +573,12 @@ def main():
     live = [f for f in facts if not f.get("excluded")]
     active = [c for c in claims if c.get("status") == "active"]
     disp = [c for c in active if c.get("type") in JUDGED]
-    state = [c for c in active if c.get("type") == "state"]
+    states = [c for c in active if c.get("type") == "state"]
     cited = cited_by_active(claims)
     pending = [f for f in live if f["id"] not in cited]
 
     print(f"facts {len(live)} 活跃 / {len(facts)-len(live)} 排除 ｜ 未消化 {len(pending)}"
-          f" ｜ 判断 {len(disp)} / 状态 {len(state)} / 背景 {len(active)-len(disp)-len(state)}"
+          f" ｜ 判断 {len(disp)} / 状态 {len(states)} / 背景 {len(active)-len(disp)-len(states)}"
           f" ｜ tensions {len(tensions)}"
           f" ｜ drafts {sum(1 for d in drafts if d.get('status','open')=='open')}")
     for w in warns:

@@ -12,9 +12,10 @@
     e2e  —— 每个 case 在临时目录里从零建仓（只拷 scripts/ 和 template/），
             用 _fixtures.py 的虚构数据跑完整条命令链。
 
-unit 直接 import 生产函数，0 子进程、约 0.1 秒出结果；
-e2e 只留 12 个必须跑完整命令链的（整批预检、视图哈希、git 提交、两阶段捕获等）。
-其余命令链用例已转成内存态单测：少起约 110 次子进程，全量目标约 1 分钟。
+unit 直接 import 生产函数，0 子进程、约 0.7 秒出结果；
+e2e 只留必须跑完整命令链的那些（整批预检、重渲染比对、git 提交、两阶段捕获、
+写盘中断回滚、示例目录能否过体检）。
+其余命令链用例已转成内存态单测：少起约 110 次子进程，全量约 1 分半。
 代价是跨脚本串联的覆盖变薄，这是明确的取舍，不是白捡的速度。
 """
 import json
@@ -246,6 +247,39 @@ def unit_事实缺asked或写编号都进草稿():
     assert len(F) == 3, "两条都不该进事实层"
     assert len(drafts) == 2, drafts
     assert {d["reason"] for d in drafts} == {"missing_asked", "choice_code"}, drafts
+
+
+@unit
+def unit_未来日期进草稿():
+    """日期写成明年、十年后，都不是「已发生的事实」，必须挡在门外。"""
+    from commit import take_fact
+    F, _, _, rc = _mem()
+    drafts, refmap = [], []
+    take_fact({"date": "2099-01-01", "kind": "自述", "asked": "什么时候的事",
+               "text": "一条日期写在未来的虚构事实", "topic": "work", "source": "user"},
+              F, rc, drafts, refmap)
+    assert len(F) == 3, "未来日期不该入库"
+    assert drafts and drafts[0]["reason"] == "future_date", drafts
+
+
+@unit
+def unit_坏行报出文件与行号():
+    """手改 JSON 漏引号，要看到「哪个文件第几行」，不是一页 traceback。"""
+    import store
+    d = Path(tempfile.mkdtemp(prefix="sp_bad_"))
+    (d / "x.jsonl").write_text('{"a": 1}\n{broken\n', encoding="utf-8")
+    old = store.ME
+    store.ME = d
+    try:
+        try:
+            store.load("x.jsonl")
+        except ValueError as e:
+            assert "x.jsonl" in str(e) and "第 2 行" in str(e), str(e)
+        else:
+            raise AssertionError("坏行没报错")
+    finally:
+        store.ME = old
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @unit
@@ -682,6 +716,113 @@ def 两阶段_对账单会打正面凭据():
     assert code == 0, out
     assert "你说 2 句" in out and "2 句落地" in out, out
     assert "本轮没交 --said" not in out, f"两阶段不该报假警报：\n{out}"
+
+
+@case
+def 写盘中断会被拦住并能回滚():
+    """十个文件顺序写，没有跨文件事务：中断后不能装作没事继续跑。"""
+    d = sandbox()
+    seed(d)
+    old = (d / "me" / "facts.jsonl").read_text(encoding="utf-8")
+    put(d, "f2.json", [{"date": TODAY, "kind": "自述", "asked": "第二问",
+                        "text": "又一条虚构事实内容", "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f2.json", "--no-git")
+    assert code == 0, out
+    # 手工摆一份「写到一半」的残留快照：只记 facts 的旧内容
+    (d / "me" / ".pending.json").write_text(json.dumps(
+        {"at": "2026-01-01T00:00:00+08:00", "files": {"facts.jsonl": old}},
+        ensure_ascii=False), encoding="utf-8")
+    code, out = run(d, "commit.py", "--facts", "f2.json", "--no-git")
+    assert code == 1 and "pending" in out, out
+    code, out = run(d, "check.py")
+    assert code == 1 and "pending" in out, out
+    code, out = run(d, "commit.py", "--recover")
+    assert code == 0, out
+    assert (d / "me" / "facts.jsonl").read_text(encoding="utf-8") == old
+    assert not (d / "me" / ".pending.json").exists()
+    code, out = run(d, "commit.py", "--facts", "f2.json", "--no-git")
+    assert code == 0, out
+
+
+@case
+def 手机号会被体检盯上():
+    """原话里留个手机号，check 不能一声不响。"""
+    d = sandbox()
+    put(d, "a.json", ["我电话是13800138000，下周联系我"])
+    code, out = run(d, "commit.py", "--capture", "a.json", "--no-git")
+    assert code == 0, out
+    code, out = run(d, "check.py")
+    assert "手机号" in out and "13800138000" in out, out
+
+
+@case
+def 补依据会重建视图():
+    """suggest --apply 以前直接改 claims.jsonl，视图停在上一次 build。"""
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    code, out = run(d, "suggest.py", "--apply", "c-001", "f-0002")
+    assert code == 0, out
+    assert "加依据" in out, out
+    code, out = run(d, "check.py")
+    assert code == 0, f"补完依据视图没跟上：\n{out}"
+    port = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
+    assert "依据 2 条" in port, "视图里的依据条数没更新"
+
+
+@case
+def 示例目录能过体检():
+    """examples/minimal 是公开示例，它自己必须过不了自己的体检就不配当示例。"""
+    d = Path(tempfile.mkdtemp(prefix="sp_ex_"))
+    TMP.append(d)
+    shutil.copytree(ROOT / "scripts", d / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "examples" / "minimal", d / "me")
+    code, out = run(d, "check.py")
+    assert code == 0, f"示例自己过不了体检：\n{out}"
+
+
+@case
+def 改数据不重建会被体检抓到():
+    """G2 不能只防手改视图：数据变了没 build，视图就是旧的，check 必须报。"""
+    d = sandbox()
+    seed(d)
+    code, out = run(d, "commit.py", "--attach", "c-001:f-0002",
+                    "--no-git", "--no-build")
+    assert code == 0, out
+    code, out = run(d, "check.py")
+    assert code == 1, f"数据改了没重建视图，check 却说通过：\n{out}"
+    assert "不一致" in out, out
+    code, out = run(d, "build.py")
+    assert code == 0, out
+    code, out = run(d, "check.py")
+    assert code == 0, f"build 之后仍不通过：\n{out}"
+
+
+@case
+def 两次捕获进同一轮():
+    """capture 不推进 round：同一轮补交原话，不该被算成下一轮。"""
+    d = sandbox()
+    put(d, "a.json", ["先发面再烤第一批"])
+    code, out = run(d, "commit.py", "--capture", "a.json", "--no-git")
+    assert code == 0, out
+    put(d, "b.json", ["骑车去河边坐着不做计划"])
+    code, out = run(d, "commit.py", "--capture", "b.json", "--no-git")
+    assert code == 0, out
+    tr = jsonl(d, "transcript.jsonl")
+    assert [t["round"] for t in tr] == [1, 1], f"两次捕获被算成两轮：{[t['round'] for t in tr]}"
+    st = json.loads((d / "me" / "state.json").read_text(encoding="utf-8"))
+    assert st.get("round") == 0 and st.get("pending_round") == 1, st
+    put(d, "f.json", [
+        {"date": TODAY, "kind": "自述", "asked": "上周店里最忙那天先做哪件事",
+         "text": "先发面再烤第一批", "topic": "work", "source": "user"},
+        {"date": TODAY, "kind": "自述", "asked": "空下来的一下午怎么过",
+         "text": "骑车去河边坐着不做计划", "topic": "leisure", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json", "--from-capture", "1",
+                    "--no-git")
+    assert code == 0, out
+    assert "你说 2 句" in out and "2 句落地" in out, out
+    st = json.loads((d / "me" / "state.json").read_text(encoding="utf-8"))
+    assert st.get("round") == 1 and "pending_round" not in st, st
 
 
 def main():

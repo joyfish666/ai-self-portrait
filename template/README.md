@@ -9,12 +9,15 @@
 |---|---|---|
 | `transcript.jsonl` | **你说过的每一句**（包括决定不记的） | `commit.py` |
 | `facts.jsonl` | 从原话里摘出来的事实（只追加，不改写） | `commit.py` |
-| `claims.jsonl` | 从事实里长出来的判断（判断 ≤60 / 状态 ≤40） | `commit.py`（代理提议，你确认） |
+| `claims.jsonl` | 从事实里长出来的判断（过 60 只提示；安全网 150 才拒） | `commit.py`（代理提议，你确认） |
 | `tensions.jsonl` | 还没解开的矛盾（≤10） | `commit.py` / `tension.py` |
 | `drafts.jsonl` | 校验没过、暂存的东西（**不丢**） | `commit.py` |
 | `rounds.jsonl` | 每轮长了多少：新增事实/判断/依据，按域 | `commit.py` |
 | `topics.jsonl` | 你**跳过**或**暂缓**的域（为什么跳） | `commit.py` |
-| `state.json` | 断点：第几轮、下一域是什么 | `commit.py` |
+| `state.json` | 断点：第几轮、当前域、哪一轮捕获了还没分拣 | `commit.py` |
+| `events.jsonl` | 确认/否决/忽略/捕获的独立事件（G8 靠它） | `commit.py` |
+| `migrations.jsonl` | 存量迁移的豁免名单（老数据不追诉） | `commit.py --migrate` |
+| `narrows.jsonl` | 措辞收窄的旧文与理由 | `commit.py --narrow` |
 | `SYNTHESIS.md` | 综述：一段段人像，每段带 `[c-xxx]` 引用 | 代理写，`synth.py --stamp` 校验 |
 | `PORTRAIT.md` | **人读版**画像（生成） | `build.py` |
 | `CONTEXT.md` | **AI 读版**上下文（生成） | `build.py` |

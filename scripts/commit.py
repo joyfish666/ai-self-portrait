@@ -37,7 +37,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -52,7 +52,7 @@ import build as build_mod          # noqa: E402
 import check as check_mod          # noqa: E402
 from store import (FRAG, add_days, age_days, atomic_write, covered_by,  # noqa: E402
                    dump_jsonl, has_fragment, is_choice_code, load, load_any,
-                   next_id, today_iso, to_date)
+                   next_id, today_iso, to_date, SENSITIVE)
 
 JUDGED = ("disposition", "inference")
 TYPES = {"constant", "state", "disposition", "inference"}
@@ -144,6 +144,11 @@ def take_fact(raw, facts, rc, drafts, refmap):
         return draft(drafts, rc, "fact_draft", raw, "schema", f"缺字段 {missing}")
     if not to_date(f["date"]):
         return draft(drafts, rc, "fact_draft", raw, "bad_date", f"date 不是 YYYY-MM-DD：{f['date']}")
+    if to_date(f["date"]) > date.today():
+        return draft(drafts, rc, "fact_draft", raw, "future_date",
+                     f"date 在未来：{f['date']} —— 记的不是已发生的事？")
+    if not check_mod.valid_topic(f["topic"]):
+        return draft(drafts, rc, "fact_draft", raw, "bad_topic", f"topic 非法：{f['topic']}")
     if f["kind"] not in KINDS:
         return draft(drafts, rc, "fact_draft", raw, "schema", f"kind 非法：{f['kind']}")
     if len(f["text"]) > 1000:
@@ -168,6 +173,9 @@ def take_fact(raw, facts, rc, drafts, refmap):
     if ref:
         refmap[ref] = f["id"]
     rc.add("✅", f["id"], "入库", clean(f["text"]))
+    if f["topic"] not in check_mod.TOPICS:
+        rc.add("⚠️", f["id"], f"扩展域 {f['topic']}",
+               "写明九块里哪块装不下它、它至少能装哪 3 条判断", claim=False)
 
 
 def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
@@ -180,6 +188,8 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
         return draft(drafts, rc, "claim_draft", raw, "schema", f"缺字段 {missing}")
     if c["type"] not in TYPES:
         return draft(drafts, rc, "claim_draft", raw, "schema", f"type 非法：{c['type']}")
+    if not check_mod.valid_topic(c["topic"]):
+        return draft(drafts, rc, "claim_draft", raw, "bad_topic", f"topic 非法：{c['topic']}")
     if len(c["text"]) > 40:
         return draft(drafts, rc, "claim_draft", raw, "too_long", f"text {len(c['text'])} 字，上限 40")
     n = len(c["context"])
@@ -212,6 +222,9 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
     c.setdefault("since", today_iso())
     if not to_date(c["since"]):
         return draft(drafts, rc, "claim_draft", raw, "bad_date", f"since 非法：{c['since']}")
+    if to_date(c["since"]) > date.today():
+        return draft(drafts, rc, "claim_draft", raw, "future_date",
+                     f"since 在未来：{c['since']}")
     # 复核期不再入库：它是 since 的派生值。固定 +365 天还会把同一批建的判断
     # 挤到同一个月到期（同一批判断会撞在同一个月），造出一个永远还不完的队列。
     # 年龄由视图现算，用到时再判断，不排队、不催、不续命。
@@ -274,6 +287,9 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
     if downgraded:
         note += "（confirmed 自报不被接受：要 --confirm 事件）"
     rc.add("✅", c["id"], "新增判断", note)
+    if c["topic"] not in check_mod.TOPICS:
+        rc.add("⚠️", c["id"], f"扩展域 {c['topic']}",
+               "写明九块里哪块装不下它、它至少能装哪 3 条判断", claim=False)
 
     if 0.75 <= twin[0] < 0.92:
         rc.add("⚠️", c["id"], f"和 {twin[1]} 像 {int(twin[0] * 100)}%",
@@ -379,9 +395,8 @@ def rewire_claims(rows, claims, facts, rc):
                f"{row.get('reason', '')}")
 
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
-SECRETS = [(EMAIL_RE, "[邮箱已遮]"), (PHONE_RE, "[手机号已遮]")]
+# 遮哪两种串、正则长什么样，和 check 共用 store 里那一份
+SECRETS = [(rx, f"[{label}已遮]") for rx, label in SENSITIVE]
 
 
 def redact_transcript(ids, reason, transcript, rc):
@@ -708,17 +723,68 @@ def narrow_claim(cid, text, context, reason, claims, fid_map, narrows, rc):
     rc.add("✏️", cid, what, reason)
 
 
-def update_state(round_no, topic):
+def update_state(round_no, topic, pending_round=None, clear_pending=False):
+    """写断点。round_no=None 表示只改别的字段，不动「已完成到第几轮」。
+
+    pending_round 是「已经捕获、还没分拣」的那一轮号。没有它的话，两次
+    --capture 会各自按 state.round+1 算，撞成同一个号，两批原话混在一起
+    分不开——分拣时一句 --from-capture 就同时拿走两批。
+    """
     p = ME / "state.json"
     st = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
     st["schema_version"] = st.get("schema_version", "0.1")
-    st["round"] = round_no
+    if round_no is not None:
+        st["round"] = round_no
     if topic:
         st["current_topic"] = topic
     st.setdefault("current_topic", "identity")
+    if pending_round:
+        st["pending_round"] = pending_round
+    if clear_pending:
+        st.pop("pending_round", None)
     st["last_commit"] = datetime.now().astimezone().isoformat(timespec="seconds")
     atomic_write(p, json.dumps(st, ensure_ascii=False, indent=2) + "\n")
     return st
+
+
+PENDING = ME / ".pending.json"
+
+
+def snapshot_before_write(names):
+    """写盘前把将要动的文件原样存一份。
+
+    十个文件顺序写，跨文件没有事务——写到第六个时断电，前五个已经落盘，
+    后五个还是旧的，state 也没前进。这份快照让「中断」变成可回滚的一件事，
+    而不是靠人去内层仓挑提交。
+    """
+    snap = {}
+    for n in names:
+        p = ME / n
+        snap[n] = p.read_text(encoding="utf-8") if p.exists() else None
+    atomic_write(PENDING, json.dumps(
+        {"at": datetime.now().astimezone().isoformat(timespec="seconds"),
+         "files": snap}, ensure_ascii=False))
+
+
+def clear_snapshot():
+    if PENDING.exists():
+        PENDING.unlink()
+
+
+def recover():
+    """把上次没写完的那一批文件还原成写之前的样子。返回是否真的回滚了。"""
+    if not PENDING.exists():
+        return False
+    data = json.loads(PENDING.read_text(encoding="utf-8"))
+    for n, text in (data.get("files") or {}).items():
+        target = ME / n
+        if text is None:
+            if target.exists():
+                target.unlink()
+        else:
+            atomic_write(target, text)
+    PENDING.unlink()
+    return True
 
 
 def git_commit(msg):
@@ -853,6 +919,46 @@ def act_veto(args, e, rc):
                e["claims"], e["events"], rc)
 
 
+def close_tension(tid, reason, tensions, rc):
+    t = next((x for x in tensions if x.get("id") == tid), None)
+    if not t:
+        rc.add("➖", tid, "找不到这条张力")
+        return
+    if t.get("status") == "closed":
+        rc.add("➖", tid, "已经是关闭状态")
+        return
+    t["status"] = "closed"
+    t["closed_reason"] = reason
+    t["closed_at"] = today_iso()
+    rc.add("✅", tid, "张力收场", reason)
+
+
+def reopen_tension(tid, tensions, rc):
+    t = next((x for x in tensions if x.get("id") == tid), None)
+    if not t:
+        rc.add("➖", tid, "找不到这条张力")
+        return
+    if t.get("status") != "closed":
+        rc.add("➖", tid, "本来就没关闭")
+        return
+    t["status"] = "open"
+    t.pop("closed_reason", None)
+    t.pop("closed_at", None)
+    rc.add("✅", tid, "张力重新打开")
+
+
+def act_close_tension(args, e, rc):
+    for tid in id_list(args.close_tension):
+        rc.count_input()
+        close_tension(tid, args.reason, e["tensions"], rc)
+
+
+def act_reopen_tension(args, e, rc):
+    for tid in id_list(args.reopen_tension):
+        rc.count_input()
+        reopen_tension(tid, e["tensions"], rc)
+
+
 def act_migrate(args, e, rc):
     migrate_legacy(e["claims"], e["transcript"], e["events"], e["migrations"], rc)
 
@@ -941,6 +1047,10 @@ ARG_SPECS = [
     {"arg": "rewire", "handler": act_rewire, "help": "换依据 + 换 context"},
     {"arg": "claims", "handler": act_claims, "help": "本批判断 JSON"},
     {"arg": "tensions", "handler": act_tensions, "help": "本批张力 JSON"},
+    {"arg": "close-tension", "label": "收场张力", "reason": True,
+     "handler": act_close_tension, "help": "关闭一条张力：t-001（要理由）"},
+    {"arg": "reopen-tension", "handler": act_reopen_tension,
+     "help": "重新打开一条张力"},
 
     {"arg": "from-capture", "opts": {"type": int, "metavar": "ROUND"},
      "help": "本轮分拣对应第几轮 capture"},
@@ -951,6 +1061,8 @@ ARG_SPECS = [
     {"arg": "reason", "help": "人的决定要留的理由"},
     {"arg": "round", "opts": {"type": int}, "help": "指定轮次"},
     {"arg": "topic", "help": "当前域"},
+    {"arg": "recover", "opts": {"action": "store_true"},
+     "help": "回滚上次没写完的那一批文件"},
     {"arg": "dry", "opts": {"action": "store_true"}, "help": "只预演，不写"},
     {"arg": "no-build", "opts": {"action": "store_true"}, "help": "不重建视图"},
     {"arg": "no-git", "opts": {"action": "store_true"}, "help": "不提交内层仓"},
@@ -971,13 +1083,32 @@ def main():
         print("me/ 还没初始化，先跑 python scripts/init.py")
         return 1
 
-    facts, claims = load("facts.jsonl"), load("claims.jsonl")
-    tensions, drafts = load("tensions.jsonl"), load("drafts.jsonl")
-    transcript, rounds = load("transcript.jsonl"), load("rounds.jsonl")
-    topics = load("topics.jsonl")
-    narrows = load("narrows.jsonl")
-    events = load("events.jsonl")
-    migrations = load("migrations.jsonl")
+    if args.recover:
+        if recover():
+            print("✅ 已把上次写盘动过的文件还原到写之前；视图没动，跑 build.py 对齐")
+            return 0
+        print("没有需要回滚的快照")
+        return 1
+    # 残留快照说明上次写到一半断了。不能装作没看见继续跑：重跑一旦成功，
+    # 末尾会把快照清掉，回滚的路就没了。只放行 --drafts 这种纯读操作。
+    if PENDING.exists() and not args.drafts:
+        print("❌ 上次写盘没走完（me/.pending.json 还在），文件可能停在半路")
+        print("   回滚到那次之前：python scripts/commit.py --recover")
+        print("   确认数据没坏、不想回滚：删掉 me/.pending.json 再继续")
+        return 1
+
+    try:
+        facts, claims = load("facts.jsonl"), load("claims.jsonl")
+        tensions, drafts = load("tensions.jsonl"), load("drafts.jsonl")
+        transcript, rounds = load("transcript.jsonl"), load("rounds.jsonl")
+        topics = load("topics.jsonl")
+        narrows = load("narrows.jsonl")
+        events = load("events.jsonl")
+        migrations = load("migrations.jsonl")
+    except ValueError as e:
+        print(f"❌ {e}")
+        print("   修好那一行再跑；或从内层仓回滚：git -C me checkout -- <文件>")
+        return 1
 
     if args.drafts:
         opened = [d for d in drafts if d.get("status", "open") == "open"]
@@ -994,15 +1125,19 @@ def main():
     if args.capture:
         st0 = json.loads((ME / "state.json").read_text(encoding="utf-8")) \
             if (ME / "state.json").exists() else {}
-        cap_round = int(st0.get("round", 0)) + 1
+        # 已经有「捕获了还没分拣」的那一轮，就接在它后面，不另开一轮
+        cap_round = int(st0.get("pending_round") or (int(st0.get("round", 0)) + 1))
         try:
             new = capture_said(load_any(args.capture), transcript, events,
                                cap_round, args.by)
         except ValueError as e:
             print(f"❌ {e}")
             return 1
+        snapshot_before_write(["transcript.jsonl", "events.jsonl", "state.json"])
         dump_jsonl(ME / "transcript.jsonl", transcript + new)
         dump_jsonl(ME / "events.jsonl", events)
+        update_state(None, None, pending_round=cap_round)
+        clear_snapshot()
         print(f"📥 第 {cap_round} 轮原话已登记 {len(new)} 句（本阶段不写事实/判断）")
         for s in new:
             print(f"   {s['id']}  {clean(s['text'], 46)}")
@@ -1127,6 +1262,13 @@ def main():
         else:
             cov["missing"].append(s)
 
+    touched = ["facts.jsonl", "claims.jsonl", "tensions.jsonl", "drafts.jsonl",
+               "transcript.jsonl", "topics.jsonl", "events.jsonl",
+               "migrations.jsonl", "rounds.jsonl", "state.json"]
+    if args.narrow:
+        touched.append("narrows.jsonl")
+    snapshot_before_write(touched)
+
     dump_jsonl(ME / "facts.jsonl", facts)
     dump_jsonl(ME / "claims.jsonl", claims)
     dump_jsonl(ME / "tensions.jsonl", tensions)
@@ -1140,9 +1282,14 @@ def main():
 
     stat = round_stats(facts_before, facts, claims_before, claims,
                        attach_delta, len(target), round_no)
+    # 同一轮重复分拣（补交事实、补挂依据）不新增一条「轮」——否则最近 3 轮
+    # 的「原地打转」统计会把同一天的操作当成三轮。
+    rounds = [r for r in rounds if r.get("round") != round_no]
     dump_jsonl(ME / "rounds.jsonl", rounds + [stat])
 
-    st = update_state(round_no, args.topic)
+    st = update_state(round_no, args.topic,
+                      clear_pending=args.from_capture is not None)
+    clear_snapshot()
 
     lost = rc.print()
     if target:
@@ -1164,6 +1311,11 @@ def main():
             tag = "在长" if j else ("在深化" if b else "原地")
             parts.append(f"{d} 判断+{j} 依据+{b}（{tag}）")
         print("📈 " + " ｜ ".join(parts))
+
+    lvl, cnt = build_mod.compute_level(
+        [c for c in claims if c.get("status") == "active"])
+    covered = sum(1 for d in build_mod.DOMAINS if cnt[d])
+    print(f"\n📊 {lvl} 完成 {covered}/{len(build_mod.DOMAINS)} 域")
 
     dr = check_mod.debt_report(facts, claims)
     if dr["count"]:

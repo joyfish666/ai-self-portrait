@@ -20,10 +20,10 @@
 他说「每天在开会、写需求文档、看数据，很久没自己动手做过东西了」——
 不满的不是忙，是没有自己的产出。
 
-`c-905` · `inferred` · `disposition` · 记录于 2026-11-05 · 依据 1 条（f-9001）
+`c-005` · `inferred` · `disposition` · 记录于 2026-11-05 · 依据 1 条（f-0001）
 ```
 
-**注意最后那行 `依据 1 条（f-9001）`。** 每条判断都能点回到一条事实。
+**注意最后那行 `依据 1 条（f-0001）`。** 每条判断都能点回到一条事实。
 判断可以被推翻；你当时说的逐字原话留在 `transcript`，只追加、不改写。
 
 ---
@@ -60,7 +60,7 @@ python scripts/init.py
 |---|---|---|
 | **事实** `facts.jsonl` | 问了什么 + 你点中的那一项文字（选项编号、未选项不入库） | **只追加，永不改写**。要更正就新增一条 |
 | **判断** `claims.jsonl` | 一句话结论（≤40 字）+ 为什么 + 依据指针 | 必须挂事实当依据；带记录日期；本人能确认、否决、推翻 |
-| **视图** `PORTRAIT.md` / `CONTEXT.md` | 渲染结果 | **每次重算**，手改会被当场报错 |
+| **视图** `PORTRAIT.md` / `CONTEXT.md` | 渲染结果 | **每次重算**，手改、或改了数据没重建，都会被当场报错 |
 
 判断被推翻时不是删除，而是分成三处：**曾经认为**（supersedes，划掉并写"改为…"）、
 **已退役**（retire，写理由，不再进正文）、**在役**。
@@ -79,7 +79,7 @@ python scripts/init.py
 | # | 保证 | 机制 |
 |---|---|---|
 | G1 | 写入即合法 | 只走 `commit.py`：schema + 引用 + 片段 + 日期 + 去重；不合格进草稿 |
-| G2 | 视图零维护 | 视图只由脚本生成；`check` 比对哈希，手改当场报错 |
+| G2 | 视图零维护 | 视图只由脚本生成；`check` 现场从数据重渲染一遍逐字比，手改和「改了数据没 build」都抓 |
 | G3 | 中断即完整 | L0/L1/L2 分层 + `state.json` 断点，随时停随时续 |
 | G4 | 年龄必可见 | 每条判断带记录日期与信息年龄；超过 180 天标「· 旧」，用到时才确认 |
 | G5 | 零概念负担 | 你只做两件事：**回答**、**否决** |
@@ -136,6 +136,10 @@ python scripts/init.py
 另有一个 `interface` 层，只放"构建画像这件事"的约定（能不能问隐私、选项怎么给），
 **不进画像正文，只进 `CONTEXT.md`**。
 
+域名单可以扩（`caregiving`、`sideproject` 这种小写英文）：写入和渲染都认，
+但它们**不进完整度**——分母永远是上面那九块。加扩展域要交代两件事：九块里哪块装不下它、
+它至少能装哪 3 条判断；说不上来，说明它本来就属于某个已有域。
+
 ---
 
 ## 文件说明
@@ -151,7 +155,7 @@ python scripts/init.py
 | `scripts/build.py` | 渲染两个视图 |
 | `scripts/check.py` | 一秒体检 + 坏味道清单 |
 | `scripts/synth.py` | 综述层：写作工作台 + 引用校验 |
-| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍；分 unit（秒级）与 e2e（完整命令链）两层，全量约 1 分钟 |
+| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍；分 unit（秒级）与 e2e（完整命令链）两层，全量约 1 分半 |
 | `scripts/digest.py` `suggest.py` `tension.py` | 消化债、依据召回、矛盾工作台 |
 | `examples/minimal/` | 起步阶段的完整示例 |
 | `me/` | **你的数据**（被 gitignore，不会提交；但它自己是一个 git 仓） |
@@ -163,7 +167,7 @@ python scripts/init.py
 ```bash
 python scripts/check.py                 # 体检 + 坏味道
 python scripts/selftest.py --unit       # 秒级纯函数层（改代码先跑这个）
-python scripts/selftest.py --e2e       # 只跑必须连起来验的 12 个端到端用例
+python scripts/selftest.py --e2e       # 只跑必须连起来验的 15 个端到端用例
 python scripts/selftest.py              # 两层全跑，改过 scripts/ 任何一行都要全绿
 python scripts/commit.py --drafts       # 校验没过、等你决定怎么改的
 python scripts/commit.py --capture said.json            # 第一步：只登记原话
@@ -174,6 +178,8 @@ python scripts/commit.py --veto    c-913 --reason "早就不是了" --by user
 python scripts/commit.py --retire c-913 --reason "…"    # 退役（要理由）
 python scripts/commit.py --narrow c-913 --text "…" --reason "原来那句说宽了"
 python scripts/commit.py --rewire x.json                # 换依据 + 换 context
+python scripts/commit.py --close-tension t-001 --reason "…"   # 张力收场
+python scripts/commit.py --recover                      # 回滚上次写盘中断
 ```
 
 ---

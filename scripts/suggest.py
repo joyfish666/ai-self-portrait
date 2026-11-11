@@ -11,6 +11,7 @@
 """
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 ME = ROOT / "me"
 sys.path.insert(0, str(ROOT / "scripts"))
-from store import dump_jsonl, load, overlap  # noqa: E402
+from store import load, overlap  # noqa: E402
 
 MIN_SHARED = 3
 AUTO_SHARED = 6
@@ -28,8 +29,20 @@ AUTO_SCORE = 0.10
 TOP = 3
 
 
-def save(name, rows):
-    dump_jsonl(ME / name, rows)
+COMMIT = Path(__file__).resolve().parent / "commit.py"
+
+
+def call_commit(*argv):
+    """补依据也走 commit.py：它会重建视图、体检、提交内层仓。
+
+    以前 --apply / --auto 直接改 claims.jsonl。数据改了，视图没重建，
+    check 也只比对 build 写下的哈希——两边一起旧，谁都不会报。
+    """
+    r = subprocess.run([sys.executable, str(COMMIT), *argv], cwd=str(ROOT),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    print(((r.stdout or "") + (r.stderr or "")).strip())
+    return r.returncode
 
 
 def score(claim, fact):
@@ -41,26 +54,18 @@ def main() -> int:
 
     if "--apply" in args:
         i = args.index("--apply")
-        cid, ids = args[i + 1], args[i + 2].split(",")
-        claims = load("claims.jsonl")
-        facts = {f["id"]: f for f in load("facts.jsonl")}
-        for c in claims:
-            if c["id"] == cid:
-                new = [x for x in ids if x in facts and x not in c["basis"]]
-                c["basis"] = c["basis"] + new
-                save("claims.jsonl", claims)
-                print(f"{cid} 依据 +{len(new)} → {len(c['basis'])} 条：{', '.join(new)}")
-                return 0
-        print(f"没找到 {cid}")
-        return 1
+        if len(args) < i + 3:
+            print("❌ 用法：--apply c-029 f-0249,f-0269")
+            return 1
+        cid, ids = args[i + 1], args[i + 2]
+        return call_commit("--attach", f"{cid}:{ids}")
 
     claims = [c for c in load("claims.jsonl") if c.get("status") == "active"]
     facts = [f for f in load("facts.jsonl") if not f.get("excluded")]
 
     facts_by_id = {f["id"]: f for f in facts}
     if "--auto" in args:
-        added = 0
-        touched = 0
+        specs, added, touched = [], 0, 0
         for c in claims:
             picked = []
             for f in facts:
@@ -70,19 +75,21 @@ def main() -> int:
                 if f["topic"] == c["topic"] and shared >= AUTO_SHARED and s >= AUTO_SCORE:
                     picked.append(f["id"])
             if picked:
+                specs.append(f"{c['id']}:{','.join(picked[:2])}")
+                added += len(picked[:2])
+                touched += 1
                 if "--dry" in args:
                     print(f"{c['id']} {c['text']}")
                     for x in picked[:2]:
                         print(f"   + {x} {facts_by_id[x]['text'][:56]}")
-                else:
-                    c["basis"] += picked[:2]
-                added += len(picked[:2])
-                touched += 1
-        if "--dry" not in args:
-            save("claims.jsonl", claims)
-        print(f"{'[dry] ' if '--dry' in args else ''}自动补齐：{touched} 条判断，"
-              f"共 +{added} 条依据（阈值 同域/重合≥{AUTO_SHARED}/分值≥{AUTO_SCORE}）")
-        return 0
+        if "--dry" in args:
+            print(f"[dry] 自动补齐：{touched} 条判断，共 +{added} 条依据"
+                  f"（阈值 同域/重合≥{AUTO_SHARED}/分值≥{AUTO_SCORE}）")
+            return 0
+        if not specs:
+            print("没有需要补依据的判断")
+            return 0
+        return call_commit("--attach", *specs)
 
     only = next((a for a in args if a.startswith("c-")), None)
     thin = 0

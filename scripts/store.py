@@ -16,17 +16,31 @@ FRAG = 8
 # 选项编号（2B / 4 BD / A/D）不是回答；事实正文只放他点中的那项文字。
 CHOICE_RE = re.compile(r"^\s*\d*\s*[A-Fa-f](?:[\s,、;；/]*[A-Fa-f])*\s*$")
 
+# 原话里的联系方式：一旦进了 me/，就是在本地埋了个雷。commit 用它遮，check 用它盯。
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+SENSITIVE = [(EMAIL_RE, "邮箱"), (PHONE_RE, "手机号")]
+
 
 def load(name):
-    """读 me/<name>，坏行报错由 check 负责；这里坏行直接抛。"""
+    """读 me/<name>。坏行不抛裸 JSONDecodeError——把文件名和行号带出来。
+
+    以前这里直接 json.loads，手改漏一个引号，check 就打一整页 traceback，
+    没人看得出是哪个文件第几行坏了。
+    """
     p = ME / name
     if not p.exists():
         return []
     out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
-        if line:
+        if not line:
+            continue
+        try:
             out.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"me/{name} 第 {n} 行不是合法 JSON：{e.msg}"
+                             f"（第 {e.colno} 列）") from None
     return out
 
 

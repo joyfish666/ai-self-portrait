@@ -28,6 +28,7 @@ CONTEXT.md
 CHANGES.md
 REVISIONS.md
 .build.json
+.pending.json
 *.tmp
 """
 

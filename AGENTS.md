@@ -356,6 +356,7 @@ python scripts/commit.py --rewire rewire.json
 |---|---|
 | 用户跑了 | 立刻 commit，输出对账单，告诉他下次怎么续 |
 | `commit.py` 说"预检失败" | **什么都没写**。按报错修 JSON，重跑；别改数据文件 |
+| `commit.py` 说 `me/.pending.json` 还在 | 上次写盘断在半路。要么 `--recover` 回滚重来，要么确认数据没坏后删掉它再继续 |
 | `commit.py` 说某条进了草稿 | 正常。告诉他草稿里是什么，问要不要重写 |
 | `check` 报"视图被手改" | 跑 `build.py` 覆盖 |
 | 拿不准是不是判断 | 记成 fact，不硬造 claim |
@@ -364,7 +365,7 @@ python scripts/commit.py --rewire rewire.json
 ## 维护动作（每次 commit 之后）
 
 ```bash
-python scripts/build.py          # 重渲染 + 更新视图哈希
+python scripts/build.py          # 重渲染（顺带更新 .build.json 的视图清单）
 python scripts/check.py          # 一圈体检
 ```
 
@@ -373,7 +374,7 @@ python scripts/check.py          # 一圈体检
 **改过 `scripts/` 里任何一行，都要跑一遍：**
 
 ```bash
-python scripts/selftest.py       # 两层全跑（秒级 unit + 12 个 e2e），约 1 分钟（给足超时）
+python scripts/selftest.py       # 两层全跑（秒级 unit + 21 个 e2e），约 1 分半（给足超时）
 python scripts/selftest.py --unit  # 只跑秒级层，改纯逻辑时先跑这个
 ```
 

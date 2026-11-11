@@ -1,0 +1,23 @@
+{
+  "claims": [
+    "c-001",
+    "c-002",
+    "c-003",
+    "c-004",
+    "c-005",
+    "c-006"
+  ],
+  "texts": {
+    "c-001": "26fabc6c",
+    "c-002": "038e47da",
+    "c-003": "4a9dc4e1",
+    "c-004": "cfa0b27a",
+    "c-005": "47e5aae5",
+    "c-006": "e8a80ff0"
+  },
+  "views": {
+    "PORTRAIT.md": "69ef1bc3",
+    "CONTEXT.md": "17701c5b"
+  },
+  "lines_context": 29
+}
