@@ -13,6 +13,8 @@ ME = ROOT / "me"
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FRAG = 8
+# 选项编号（2B / 4 BD / A/D）不是回答；事实正文只放他点中的那项文字。
+CHOICE_RE = re.compile(r"^\s*\d*\s*[A-Fa-f](?:[\s,、;；/]*[A-Fa-f])*\s*$")
 
 
 def load(name):
@@ -121,6 +123,11 @@ def covered_by(text, fact_texts, min_len=FRAG):
         if len(f) >= min_len and (f in t or t in f):
             return True
     return False
+
+
+def is_choice_code(text):
+    """选项编号不是回答：2B / 4 BD / A/D 这类不能当事实正文。"""
+    return bool(CHOICE_RE.match(str(text)))
 
 
 STOP = set("的了是我你他她在和就不都也很还要会能对这个那个什么怎么因为所以但是而且如果就是一样")

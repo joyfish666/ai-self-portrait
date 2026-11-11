@@ -10,10 +10,12 @@
     python scripts/commit.py --exclude f-0001,f-0002 --action noise --reason "过程记录"
     python scripts/commit.py --drafts              # 看草稿区
     python scripts/commit.py --drop d-001 --reason "已重写成 c-0102"
-    python scripts/commit.py --due                 # 复核期到了的，今天先摆 3 条
-    python scripts/commit.py --due 5               # 摆 5 条
-    python scripts/commit.py --renew c-013,c-014 --reason "还是一样"   # 一批
-    python scripts/commit.py --narrow c-013 --text "…" --reason "…"    # 只收窄措辞
+    python scripts/commit.py --capture said.json   # 第一步：只登记原话
+    python scripts/commit.py --facts f.json --claims c.json --from-capture 51
+    python scripts/commit.py --ignore s-0120 --reason "纯日常"
+    python scripts/commit.py --confirm c-013 --reason "本人认这条" --by user
+    python scripts/commit.py --narrow c-013 --text "…" --reason "…"
+    python scripts/commit.py --migrate             # 一次性存量迁移（幂等）
     python scripts/commit.py --dry --facts ...     # 只预演，不写
 
 输入格式
@@ -34,6 +36,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -48,60 +51,67 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import build as build_mod          # noqa: E402
 import check as check_mod          # noqa: E402
 from store import (add_days, age_days, atomic_write, covered_by, dump_jsonl,  # noqa: E402
-                   has_fragment, load, load_any, next_id, today_iso, to_date)
+                   has_fragment, is_choice_code, load, load_any, next_id, today_iso, to_date)
 
 JUDGED = ("disposition", "inference")
 TYPES = {"constant", "state", "disposition", "inference"}
 CONFS = {"confirmed", "inferred", "unsure", "unconfirmed"}
 KINDS = {"自述", "行为", "他人转述", "AI观察"}
 SOURCES = {"user", "ai", "external"}
-REVIEW_DAYS = {"state": 90, "disposition": 365}
 FP_RE = re.compile(r"<!--\s*fp:([0-9a-f]{8})\s*-->")
 
 
 class Receipt:
+    """一条输入一个 slot；add() 认领最近一个还没终态的 slot。
+
+    以前「丢失」是 10 类图标做减法算出来的：inputs − 入库 − 排除 − …。
+    那种写法每加一种收场动作就要同步改一次减法，漏一类就把真实写入算成丢失
+    （selftest 里那个「剔除悬空依据不会算成负数」用例就是这么来的）。
+    现在只回答一个问题：还有几条输入没有任何终态？图标只负责显示。
+    """
+
     def __init__(self):
         self.rows = []
-        self.inputs = 0
-
-    def add(self, icon, ident, what, detail=""):
-        self.rows.append((icon, ident, what, detail))
+        self.slots = []
 
     def count_input(self, n=1):
-        self.inputs += n
+        for _ in range(n):
+            self.slots.append({"seq": len(self.slots) + 1, "claimed": None})
+
+    def add(self, icon, ident, what, detail="", *, claim=True):
+        """claim=False 用于纯提示（如 ⚠️）：它不构成一条输入的终态。"""
+        self.rows.append((icon, ident, what, detail))
+        if claim:
+            for s in self.slots:          # 顺序处理：认领最早一条还没有终态的输入
+                if s["claimed"] is None:
+                    s["claimed"] = (icon, ident, what)
+                    break
+
+    @property
+    def inputs(self):
+        return len(self.slots)
+
+    def unclaimed(self):
+        return [s for s in self.slots if s["claimed"] is None]
 
     def print(self):
-        stored = sum(1 for r in self.rows if r[0] == "✅")
-        excluded = sum(1 for r in self.rows if r[0] == "🚫")
-        doors = sum(1 for r in self.rows if r[0] == "🚪")
-        retopied = sum(1 for r in self.rows if r[0] == "📁")
-        detached = sum(1 for r in self.rows if r[0] == "✂️")
-        rewired = sum(1 for r in self.rows if r[0] == "🔄")
-        redacted = sum(1 for r in self.rows if r[0] == "🕶️")
-        narrowed = sum(1 for r in self.rows if r[0] == "✏️")
-        drafted = sum(1 for r in self.rows if r[0] == "🔶")
-        skipped = sum(1 for r in self.rows if r[0] == "➖")
-        lost = (self.inputs - stored - excluded - doors - retopied
-                - detached - rewired - redacted - narrowed - drafted - skipped)
+        c = Counter(r[0] for r in self.rows)
+        lost = len(self.unclaimed())
         print(f"\n本轮对账（输入 {self.inputs} 条）")
         for icon, ident, what, detail in self.rows:
             tail = f"  {detail}" if detail else ""
             print(f"{icon} {ident} {what}{tail}")
-        parts = [f"{stored} 入库", f"{excluded} 排除"]
-        if doors:
-            parts.append(f"{doors} 退役/续期")
-        if retopied:
-            parts.append(f"{retopied} 改归档")
-        if detached:
-            parts.append(f"{detached} 撤依据")
-        if rewired:
-            parts.append(f"{rewired} 换依据")
-        if redacted:
-            parts.append(f"{redacted} 遮敏感")
-        if narrowed:
-            parts.append(f"{narrowed} 收窄措辞")
-        parts += [f"{drafted} 进草稿", f"{skipped} 跳过", f"{lost} 丢失"]
+        parts = [f"{c['✅']} 入库", f"{c['🚫']} 排除"]
+        for icon, name in (("🚪", "退役/续期"), ("📁", "改归档"),
+                           ("✂️", "撤依据"), ("🔄", "换依据"),
+                           ("🕶️", "遮敏感"), ("✏️", "收窄措辞")):
+            if c[icon]:
+                parts.append(f"{c[icon]} {name}")
+        parts += [f"{c['🔶']} 进草稿", f"{c['➖']} 跳过", f"{lost} 丢失"]
         print("\n📊 " + " ｜ ".join(parts))
+        if lost:
+            print("⚠️  有输入没有终态：" +
+                  "、".join(f"#{s['seq']}" for s in self.unclaimed()[:5]))
         return lost
 
 
@@ -137,6 +147,9 @@ def take_fact(raw, facts, rc, drafts, refmap):
         return draft(drafts, rc, "fact_draft", raw, "schema", f"kind 非法：{f['kind']}")
     if len(f["text"]) > 1000:
         return draft(drafts, rc, "fact_draft", raw, "too_long", f"正文 {len(f['text'])} 字，上限 1000")
+    if is_choice_code(f["text"]):
+        return draft(drafts, rc, "fact_draft", raw, "choice_code",
+                     "text 是选项编号，请填他点中的那项文字")
     if not f.get("asked"):
         return draft(drafts, rc, "fact_draft", raw, "missing_asked",
                      "缺 asked —— 四步判定的第 2 步靠它")
@@ -175,13 +188,11 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
     c.setdefault("source", "ai")
     if c["source"] not in SOURCES:
         return draft(drafts, rc, "claim_draft", raw, "schema", f"source 非法：{c['source']}")
-    c.setdefault("confidence", "inferred")
-    if c["confidence"] not in CONFS:
-        return draft(drafts, rc, "claim_draft", raw, "schema", f"confidence 非法：{c['confidence']}")
-    downgraded = False
-    if c["source"] == "ai" and c["confidence"] == "confirmed":
-        c["confidence"] = "inferred"
-        downgraded = True
+    # confirmed 只能由一条独立的 --confirm 事件产生，不接受提交方自报。
+    # 以前红线只拦 source=ai，把 source 填成 user 就能让 AI 写的判断拿到
+    # 「本人已确认」；迁移前有一批判断就是这么来的。现在这条路由代码定死。
+    downgraded = c.get("confidence") == "confirmed"
+    c["confidence"] = "inferred" if c["source"] == "ai" else "unconfirmed"
 
     basis, bad = [], []
     for b in c.get("basis") or []:
@@ -195,22 +206,15 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
     src_text = "".join(fid_map[b]["text"] for b in basis)
     if not has_fragment(c["context"], src_text):
         return draft(drafts, rc, "claim_draft", raw, "context_no_fragment",
-                     "context 没有引用依据原话（至少 8 个字连续）")
+                     "context 没有引用依据内容（至少 8 个字连续）")
 
     c.setdefault("since", today_iso())
     if not to_date(c["since"]):
         return draft(drafts, rc, "claim_draft", raw, "bad_date", f"since 非法：{c['since']}")
-
-    want = None
-    if c["type"] in REVIEW_DAYS:
-        want = add_days(c["since"], REVIEW_DAYS[c["type"]])
-    given = c.get("review_after")
-    if given is not None and want and to_date(given):
-        lo = add_days(c["since"], {"state": 60, "disposition": 300}[c["type"]])
-        hi = add_days(c["since"], {"state": 200, "disposition": 400}[c["type"]])
-        c["review_after"] = given if lo <= given <= hi else want
-    else:
-        c["review_after"] = want
+    # 复核期不再入库：它是 since 的派生值。固定 +365 天还会把同一批建的判断
+    # 挤到同一个月到期（同一批判断会撞在同一个月），造出一个永远还不完的队列。
+    # 年龄由视图现算，用到时再判断，不排队、不催、不续命。
+    c.pop("review_after", None)
 
     norm = "".join(str(c["text"]).split())
     for old in claims:
@@ -267,19 +271,21 @@ def take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions=None):
     if bad:
         note += f"（剔除了悬空依据 {','.join(bad)}）"
     if downgraded:
-        note += "（ai 不能 confirmed，已降为 inferred）"
+        note += "（confirmed 自报不被接受：要 --confirm 事件）"
     rc.add("✅", c["id"], "新增判断", note)
 
     if 0.75 <= twin[0] < 0.92:
         rc.add("⚠️", c["id"], f"和 {twin[1]} 像 {int(twin[0] * 100)}%",
-               "两条都在说这件事吗？是的话合并，不是就把区别写进 context")
+               "两条都在说这件事吗？是的话合并，不是就把区别写进 context",
+               claim=False)
 
     # 话别说得比证据远：依据全来自"干活现场"（kind=行为），判断却落在生活域
     if c.get("topic") not in ("work", "methods", "interface", "misc"):
         kinds = [fid_map[b].get("kind") for b in c.get("basis", []) if b in fid_map]
         if kinds and all(k == "行为" for k in kinds):
             rc.add("⚠️", c["id"], f"落在 {c['topic']}，但依据全来自干活现场",
-                   "这条是不是写高了？拿掉这个场合，还有别的场合也符合吗")
+                   "这条是不是写高了？拿掉这个场合，还有别的场合也符合吗",
+                   claim=False)
 
 
 def detach_basis(specs, claims, facts, rc):
@@ -328,7 +334,7 @@ def rewire_claims(rows, claims, facts, rc):
     """换依据：一条判断原来指向"我自己的结论"，改成指向他的原话。
 
     为什么必须是一个动作，而不是 --attach + --detach：
-    `context` 里引用的是依据原话，换了依据，context 往往也引错了对象——
+    `context` 里引用的是依据内容，换了依据，context 往往也引错了对象——
     所以"换线"在数据里是**依据 + context 一起换**的三件事。拆开做，
     中间那个状态是坏的（context 指向一条已经被撤掉的依据）。
 
@@ -430,6 +436,7 @@ def exclude_facts(ids, action, reason, facts, rc):
         f = by.get(i)
         if not f:
             unknown.append(i)
+            rc.add("➖", i, "找不到这条事实")
             continue
         if f.get("excluded"):
             rc.add("➖", i, "已是排除状态")
@@ -511,18 +518,98 @@ def unretire_claim(cid, claims, rc):
     rc.add("🚪", cid, "放回来（重新在役）")
 
 
-def renew_claim(cid, reason, claims, rc):
-    c = next((x for x in claims if x["id"] == cid), None)
-    if not c or c.get("status") != "active":
-        rc.add("➖", cid, "不是活跃判断，没法续期")
+def append_event(events, kind, target, reason, actor="user"):
+    """每一次「人的决定」都留一条不可追改的事件。"""
+    events.append({"id": next_id(events, "e", 4), "kind": kind,
+                   "target": target, "actor": actor, "at": today_iso(),
+                   "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+                   "reason": reason})
+
+
+def confirm_claim(cid, reason, actor, claims, events, rc):
+    c = next((x for x in claims if x["id"] == cid and x.get("status") == "active"), None)
+    if not c:
+        rc.add("➖", cid, "不是在役判断，没法确认")
         return
-    if c.get("type") not in REVIEW_DAYS:
-        rc.add("➖", cid, "这个类型没有复核期，不用续", str(c.get("type")))
+    c["confidence"] = "confirmed"
+    append_event(events, "confirm", cid, reason, actor)
+    rc.add("✅", cid, "本人确认", f"{actor}：{reason}")
+
+
+def veto_claim(cid, reason, actor, claims, events, rc):
+    c = next((x for x in claims if x["id"] == cid and x.get("status") == "active"), None)
+    if not c:
+        rc.add("➖", cid, "不是在役判断，没法否决")
         return
-    c["review_after"] = add_days(today_iso(), REVIEW_DAYS[c["type"]])
-    c["renewed_at"] = today_iso()
-    c["renewed_reason"] = reason
-    rc.add("🚪", cid, f"续期到 {c['review_after']}", reason)
+    c["confidence"] = "unconfirmed"
+    append_event(events, "veto", cid, reason, actor)
+    rc.add("✅", cid, "本人否决（转为未确认）", f"{actor}：{reason}")
+
+
+def ignore_said(specs, reason, actor, transcript, events, rc):
+    by = {t.get("id"): t for t in transcript}
+    for sid in specs:
+        rc.count_input()
+        t = by.get(sid)
+        if not t:
+            rc.add("➖", sid, "找不到这条原话")
+            continue
+        if t.get("ignored"):
+            rc.add("➖", sid, "已经标过不记")
+            continue
+        t["ignored"] = reason
+        t["ignored_at"] = today_iso()
+        t["ignored_by"] = actor
+        append_event(events, "ignore", sid, reason, actor)
+        rc.add("✅", sid, "显式标为不记", reason)
+
+
+def capture_said(rows, transcript, events, round_no, actor):
+    """只登记原话。这里不写 facts / claims，也不接受「这句不记」的决定。
+
+    限度：同一个 agent 分两次调用，理论上仍可以第一步就少交一句。
+    所以这一刀不宣称「独立记录」，只保证交上来的每句都有可见终态、
+    且不能在同一次调用里被顺手抹掉。
+    """
+    for it in rows:
+        if not isinstance(it, str):
+            raise ValueError("capture 只收纯文本原话；{'ignored': …} 请走 --ignore")
+    new = []
+    for text in rows:
+        if not str(text).strip():
+            continue
+        new.append({"id": next_id(transcript + new, "s", 4), "date": today_iso(),
+                    "round": round_no, "text": str(text)})
+    for row in new:
+        append_event(events, "capture", row["id"], "本轮原话捕获", actor)
+    return new
+
+
+def migrate_legacy(claims, transcript, events, migrations, rc):
+    """把迁移前的自报值固化成豁免名单，并清掉派生字段。幂等。"""
+    if any(m.get("kind") == "legacy" for m in migrations):
+        rc.count_input()
+        rc.add("➖", "migrate", "已经迁过，不重复写")
+        return
+    confirmed = [c["id"] for c in claims
+                 if c.get("status") == "active" and c.get("confidence") == "confirmed"]
+    ignored = [t["id"] for t in transcript if t.get("ignored")]
+    dropped = 0
+    for c in claims:
+        if "review_after" in c:
+            c.pop("review_after")
+            dropped += 1
+        for k in ("renewed_at", "renewed_reason"):
+            c.pop(k, None)
+    row = {"kind": "legacy", "at": today_iso(),
+           "confirmed": confirmed, "ignored": ignored,
+           "reason": "迁移前历史：confirmed / ignored 由提交方自报，无独立事件；此后新写入必须有事件"}
+    migrations.append(row)
+    append_event(events, "migration", "legacy", row["reason"], "system")
+    rc.count_input()
+    rc.add("✅", "migrate", "存量迁移",
+           f"固化 {len(confirmed)} 条 confirmed / {len(ignored)} 句 ignored；"
+           f"清掉 {dropped} 个 review_after")
 
 
 def retopic_claim(spec, reason, claims, rc):
@@ -558,13 +645,13 @@ def narrow_claim(cid, text, context, reason, claims, fid_map, narrows, rc):
     """只收窄措辞：改 active 判断的 text（可选连 context），其余一概不动。
 
     判断不是证据，是当时的一个解释。改掉它不丢信息（原话还在），但走 supersedes
-    会凭空造出一条新判断、「曾经认为」一节、依据掉回消化债、复核期从今天重算——
+    会凭空造出一条新判断、「曾经认为」一节、依据掉回消化债、白白多一条历史——
     改两个字要动七处，结果就是没人改。所以单独一个动作：不动 id / status / basis /
-    topic / type / review_after，只把旧文与理由记进 narrows.jsonl（人的决定），
+    topic / type / since，只把旧文与理由记进 narrows.jsonl（人的决定），
     由 build 渲染进 REVISIONS.md。理由必填 + me/ 每轮 git 留 diff，防静默修改。
 
     context 里常常也写着说宽了的那句，所以允许一起换；但换完仍要过原来那道校验：
-    30–150 字，且必须含依据原话的连续 8 字。
+    30–150 字，且必须含依据内容的连续 8 字。
     """
     c = next((x for x in claims if x["id"] == cid), None)
     if not c:
@@ -593,7 +680,7 @@ def narrow_claim(cid, text, context, reason, claims, fid_map, narrows, rc):
         srcs = [fid_map[b]["text"] for b in c.get("basis", [])
                 if b in fid_map and not fid_map[b].get("excluded")]
         if not any(has_fragment(context, s) for s in srcs):
-            rc.add("➖", cid, "新 context 没含依据原话片段（8 字）")
+            rc.add("➖", cid, "新 context 没含依据内容片段（8 字）")
             return
     row = {"id": cid, "date": today_iso(), "old": old,
            "new": text, "reason": reason}
@@ -687,42 +774,186 @@ def synthesis_stale(claims):
     return m.group(1) != build_mod.syn_fingerprint(claims)
 
 
+# ---------------------------------------------------------------- 动作表
+# 加一种收场动作：在 ARG_SPECS 里加一行（写明要不要理由）+ 写一个 act_xxx。
+# 参数定义、理由校验、执行顺序都由这张表驱动，main() 不再逐个 if。
+# ACTIONS 的顺序就是执行顺序：facts 要在 exclude 前，claims 要在 attach 后。
+
+
+def act_domain(args, e, rc):
+    dom = args.skip or args.defer
+    kind = "skipped" if args.skip else "deferred"
+    if not check_mod.valid_topic(dom):
+        print(f"❌ 不认识的域：{dom}")
+        return 1
+    rc.count_input()
+    rows = [x for x in e["topics"] if x.get("domain") != dom]
+    row = {"domain": dom, "state": kind, "reason": args.reason, "since": today_iso()}
+    if kind == "deferred":
+        row["until"] = add_days(today_iso(), args.days)
+    rows.append(row)
+    e["topics"] = rows
+    rc.add("✅", dom, "跳过" if kind == "skipped" else f"暂缓 {args.days} 天", args.reason)
+
+
+def act_narrow(args, e, rc):
+    rc.count_input()
+    narrow_claim(args.narrow.strip(), args.text, args.context, args.reason,
+                 e["claims"], e["fid_map"], e["narrows"], rc)
+
+
+def act_retire(args, e, rc):
+    for cid in id_list(args.retire):
+        rc.count_input()
+        retire_claim(cid, args.reason, e["claims"], e["tensions"], rc, e["fid_map"])
+
+
+def act_unretire(args, e, rc):
+    for cid in id_list(args.unretire):
+        rc.count_input()
+        unretire_claim(cid, e["claims"], rc)
+
+
+def act_redact(args, e, rc):
+    for sid in id_list(args.redact):
+        redact_transcript([sid], args.reason, e["transcript"], rc)
+
+
+def act_retopic(args, e, rc):
+    for spec in id_list(args.retopic):
+        rc.count_input()
+        retopic_claim(spec, args.reason, e["claims"], rc)
+
+
+def act_ignore(args, e, rc):
+    ignore_said(id_list(args.ignore), args.reason, args.by,
+                e["transcript"], e["events"], rc)
+
+
+def act_confirm(args, e, rc):
+    rc.count_input()
+    confirm_claim(args.confirm.strip(), args.reason, args.by,
+                  e["claims"], e["events"], rc)
+
+
+def act_veto(args, e, rc):
+    rc.count_input()
+    veto_claim(args.veto.strip(), args.reason, args.by,
+               e["claims"], e["events"], rc)
+
+
+def act_migrate(args, e, rc):
+    migrate_legacy(e["claims"], e["transcript"], e["events"], e["migrations"], rc)
+
+
+def act_facts(args, e, rc):
+    for raw in load_any(args.facts):
+        take_fact(raw, e["facts"], rc, e["drafts"], e["refmap"])
+    for f in e["facts"]:
+        e["fid_map"][f["id"]] = f
+
+
+def act_exclude(args, e, rc):
+    unknown = exclude_facts([x.strip() for x in args.exclude.split(",") if x.strip()],
+                            args.action, args.reason, e["facts"], rc)
+    if unknown:
+        print(f"❌ 找不到这些 fact：{unknown} —— 什么都没写")
+        return 1
+
+
+def act_attach(args, e, rc):
+    e["attach_delta"] = attach_basis(args.attach, e["claims"], e["facts"], rc)
+
+
+def act_detach(args, e, rc):
+    detach_basis(args.detach, e["claims"], e["facts"], rc)
+
+
+def act_rewire(args, e, rc):
+    rewire_claims(load_any(args.rewire), e["claims"], e["facts"], rc)
+
+
+def act_claims(args, e, rc):
+    for raw in load_any(args.claims):
+        take_claim(raw, e["claims"], e["fid_map"], rc, e["drafts"],
+                   e["refmap"], e["tensions"])
+
+
+def act_tensions(args, e, rc):
+    for raw in load_any(args.tensions):
+        take_tension(raw, e["tensions"], e["claims"], rc, e["drafts"], e["refmap"])
+
+
+def action_trigger(spec, args):
+    """默认按同名参数取值；skip/defer 这种共用处理函数的可以自定义。"""
+    if spec.get("trigger"):
+        return spec["trigger"](args)
+    return getattr(args, spec["arg"].replace("-", "_"), None)
+
+
+ARG_SPECS = [
+    {"arg": "said", "help": "兼容路径：纯文本原话数组"},
+    {"arg": "capture", "help": "只登记原话：said.json（不接受 ignored 字段）"},
+    {"arg": "drafts", "opts": {"action": "store_true"}, "help": "看草稿区"},
+    {"arg": "drop", "label": "关闭草稿", "reason": True, "help": "关闭某条草稿"},
+
+    {"arg": "skip", "label": "跳过域", "reason": True, "handler": act_domain,
+     "trigger": lambda a: a.skip or a.defer, "help": "永久跳过某个域"},
+    {"arg": "defer", "label": "暂缓域", "reason": True, "help": "暂时不想聊某个域"},
+    {"arg": "narrow", "label": "收窄措辞", "reason": True, "handler": act_narrow,
+     "help": "收窄措辞：c-069（要 --text 和 --reason）"},
+    {"arg": "text", "help": "--narrow 的新措辞"},
+    {"arg": "context", "help": "--narrow 可同时换说明"},
+    {"arg": "retire", "label": "退役判断", "reason": True, "handler": act_retire,
+     "help": "退役判断，逗号分隔可批量"},
+    {"arg": "unretire", "handler": act_unretire, "help": "把退役的判断放回来"},
+    {"arg": "redact", "label": "遮敏感串", "reason": True, "handler": act_redact,
+     "help": "遮住原话里的联系方式"},
+    {"arg": "retopic", "label": "改归档", "reason": True, "handler": act_retopic,
+     "help": "改归档：c-038:work"},
+    {"arg": "ignore", "label": "忽略原话", "reason": True, "handler": act_ignore,
+     "help": "显式标为不记：s-0120"},
+    {"arg": "confirm", "label": "确认判断", "reason": True, "handler": act_confirm,
+     "help": "本人确认判断"},
+    {"arg": "veto", "label": "否决判断", "reason": True, "handler": act_veto,
+     "help": "本人否决判断"},
+    {"arg": "migrate", "opts": {"action": "store_true"}, "handler": act_migrate,
+     "help": "一次性存量迁移"},
+
+    {"arg": "facts", "handler": act_facts, "help": "本批事实 JSON"},
+    {"arg": "exclude", "label": "排除事实", "reason": True, "handler": act_exclude,
+     "help": "逗号分隔的 fact id"},
+    {"arg": "attach", "opts": {"action": "append", "default": []},
+     "handler": act_attach, "help": "c-023:f-0001，可重复"},
+    {"arg": "detach", "opts": {"action": "append", "default": []},
+     "handler": act_detach, "help": "撤掉接错的依据"},
+    {"arg": "rewire", "handler": act_rewire, "help": "换依据 + 换 context"},
+    {"arg": "claims", "handler": act_claims, "help": "本批判断 JSON"},
+    {"arg": "tensions", "handler": act_tensions, "help": "本批张力 JSON"},
+
+    {"arg": "from-capture", "opts": {"type": int, "metavar": "ROUND"},
+     "help": "本轮分拣对应第几轮 capture"},
+    {"arg": "days", "opts": {"type": int, "default": 30}, "help": "暂缓天数"},
+    {"arg": "by", "opts": {"default": "user"}, "help": "决定主体"},
+    {"arg": "action", "opts": {"choices": ["noise", "archived"], "default": "noise"},
+     "help": "排除动作"},
+    {"arg": "reason", "help": "人的决定要留的理由"},
+    {"arg": "round", "opts": {"type": int}, "help": "指定轮次"},
+    {"arg": "topic", "help": "当前域"},
+    {"arg": "dry", "opts": {"action": "store_true"}, "help": "只预演，不写"},
+    {"arg": "no-build", "opts": {"action": "store_true"}, "help": "不重建视图"},
+    {"arg": "no-git", "opts": {"action": "store_true"}, "help": "不提交内层仓"},
+]
+
+ACTIONS = [a for a in ARG_SPECS if a.get("handler")]
+REASON_ARGS = {a["arg"]: a["label"] for a in ARG_SPECS if a.get("reason")}
+
+
 def main():
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("--said")
-    ap.add_argument("--facts")
-    ap.add_argument("--claims")
-    ap.add_argument("--tensions")
-    ap.add_argument("--attach", action="append", default=[],
-                    help="c-023:f-0001,f-0002，可重复")
-    ap.add_argument("--detach", action="append", default=[],
-                    help="撤掉接错的依据：c-055:f-0093,f-0156（撤完必须还剩 ≥1 条）")
-    ap.add_argument("--rewire",
-                    help="换依据+换 context 一次做完（JSON 文件，见 AGENTS.md）")
-    ap.add_argument("--redact", help="遮住原话里的邮箱/手机号：s-0120（要 --reason）")
-    ap.add_argument("--exclude", help="逗号分隔的 fact id")
-    ap.add_argument("--skip", help="永久跳过某个域（要 --reason）")
-    ap.add_argument("--defer", help="暂时不想聊某个域（要 --reason，默认 30 天）")
-    ap.add_argument("--days", type=int, default=30)
-    ap.add_argument("--retire", help="退役判断，逗号分隔可批量（要 --reason）")
-    ap.add_argument("--unretire", help="把退役的判断放回来，逗号分隔可批量")
-    ap.add_argument("--renew", help="续期：复核期往后推，逗号分隔可批量")
-    ap.add_argument("--retopic", help="改归档：c-038:work,c-060:work（要 --reason）")
-    ap.add_argument("--narrow", help="收窄措辞：c-069（要 --text 和 --reason）")
-    ap.add_argument("--text", help="--narrow 的新措辞（≤40 字）")
-    ap.add_argument("--context",
-                    help="--narrow 可同时换说明（30–150 字，仍要含依据 8 字原话片段）")
-    ap.add_argument("--due", nargs="?", type=int, const=3, default=None, metavar="N",
-                    help="摆出复核期到了的判断，今天先看 N 条（默认 3）")
-    ap.add_argument("--action", choices=["noise", "archived"], default="noise")
-    ap.add_argument("--reason")
-    ap.add_argument("--round", type=int)
-    ap.add_argument("--topic")
-    ap.add_argument("--dry", action="store_true")
-    ap.add_argument("--no-build", action="store_true")
-    ap.add_argument("--no-git", action="store_true")
-    ap.add_argument("--drafts", action="store_true")
-    ap.add_argument("--drop", help="关闭某条草稿")
+    for spec in ARG_SPECS:
+        ap.add_argument("--" + spec["arg"], help=spec.get("help", ""),
+                        **spec.get("opts", {}))
     args = ap.parse_args()
 
     if not (ME / "claims.jsonl").exists():
@@ -734,6 +965,8 @@ def main():
     transcript, rounds = load("transcript.jsonl"), load("rounds.jsonl")
     topics = load("topics.jsonl")
     narrows = load("narrows.jsonl")
+    events = load("events.jsonl")
+    migrations = load("migrations.jsonl")
 
     if args.drafts:
         opened = [d for d in drafts if d.get("status", "open") == "open"]
@@ -747,10 +980,36 @@ def main():
         print("\n修好后重跑 commit.py；放弃就 --drop <id> --reason \"…\"")
         return 0
 
-    if args.drop:
-        if not args.reason:
-            print("关闭草稿必须写 --reason")
+    if args.capture:
+        st0 = json.loads((ME / "state.json").read_text(encoding="utf-8")) \
+            if (ME / "state.json").exists() else {}
+        cap_round = int(st0.get("round", 0)) + 1
+        try:
+            new = capture_said(load_any(args.capture), transcript, events,
+                               cap_round, args.by)
+        except ValueError as e:
+            print(f"❌ {e}")
             return 1
+        dump_jsonl(ME / "transcript.jsonl", transcript + new)
+        dump_jsonl(ME / "events.jsonl", events)
+        print(f"📥 第 {cap_round} 轮原话已登记 {len(new)} 句（本阶段不写事实/判断）")
+        for s in new:
+            print(f"   {s['id']}  {clean(s['text'], 46)}")
+        print("下一步：--facts/--claims 加 --from-capture <轮次> 完成分拣；"
+              "不记的句子走 --ignore <id> --reason \"…\"")
+        if not args.no_git:
+            rev = git_commit(f"第 {cap_round} 轮：捕获 {len(new)} 句原话")
+            if rev:
+                print(f"git：me/ 已提交 {rev}")
+        return 0
+
+    need_reason = [label for arg, label in REASON_ARGS.items()
+                   if getattr(args, arg, None)]
+    if need_reason and not args.reason:
+        print("❌ 这些动作必须带 --reason（人的决定要留痕）：" + "、".join(need_reason))
+        return 1
+
+    if args.drop:
         hit = next((d for d in drafts if d["id"] == args.drop), None)
         if not hit:
             print(f"没找到草稿 {args.drop}")
@@ -762,148 +1021,52 @@ def main():
         print(f"已关闭 {args.drop}：{args.reason}")
         return 0
 
-    if args.due is not None:
-        n = max(1, args.due)
-        today = today_iso()
-        due = [c for c in claims if c.get("status") == "active"
-               and c.get("review_after") and c["review_after"] < today]
-        due.sort(key=lambda c: (c.get("review_after") or "", c["id"]))
-        if not due:
-            print("✅ 没有到期的判断")
-            return 0
-        show = due[:n]
-        rest = len(due) - len(show)
-        print(f"⏳ {len(due)} 条复核期到了 ｜ 今天先看 {len(show)} 条"
-              + (f"，剩下 {rest} 条排着（排队，不是欠债）" if rest else ""))
-        print("")
-        for i, c in enumerate(show, 1):
-            late = age_days(c.get("review_after"), today) or 0
-            print(f"  {i}. {c['id']}  {c.get('type')} · {c.get('topic')}"
-                  f" · 逾期 {late} 天 · 依据 {len(c.get('basis') or [])} 条")
-            print(f"     「{clean(c.get('text'), 34)}」")
-        print("")
-        print("每条四种收场，挑一个（四步判定的结论决定挑哪个）：")
-        print("  还成立，这轮有新证据 → --attach <id>:f-xxxx")
-        print('  还成立，没新证据     → --renew <id> --reason "…"')
-        print("  不成立，有新结论     → 写新 claim + supersedes + reason")
-        print('  不成立，写不出替代   → --retire <id> --reason "…"')
-        if len(show) > 1:
-            print(f'  同一批同一个理由     → --renew {",".join(c["id"] for c in show)} --reason "…"')
-        return 0
-
     st_old = json.loads((ME / "state.json").read_text(encoding="utf-8")) \
         if (ME / "state.json").exists() else {}
     round_no = args.round if args.round is not None else int(st_old.get("round", 0)) + 1
 
-    # 原话先落地：连"没记的那些"也留下
+    # 原话登记。--said 保留为兼容路径，但只收纯文本：
+    # 「这句不记」不再能在同一次调用里顺手写掉，必须走 --ignore 显式动作。
     new_said = []
     for it in (load_any(args.said) if args.said else []):
-        if isinstance(it, str):
-            text, ignored = it, None
-        else:
-            text, ignored = it.get("text", ""), it.get("ignored")
-        if not text.strip():
+        if not isinstance(it, str):
+            print("❌ --said 只收纯文本原话；{'text':…, 'ignored':…} 已废弃。"
+                  "先用 --capture 登记，再用 --ignore <id> --reason \"…\" 显式标为不记。")
+            return 1
+        if not it.strip():
             continue
-        row = {"id": next_id(transcript + new_said, "s", 4), "date": today_iso(),
-               "round": round_no, "text": text}
-        if ignored:
-            row["ignored"] = ignored
-        new_said.append(row)
+        new_said.append({"id": next_id(transcript + new_said, "s", 4),
+                         "date": today_iso(), "round": round_no, "text": it})
+    for s in new_said:
+        append_event(events, "capture", s["id"], "本轮原话登记", args.by)
 
     rc = Receipt()
     refmap = {}
     facts_before, claims_before = len(facts), len(claims)
     fid_map = {f["id"]: f for f in facts}
 
-    if args.skip or args.defer:
-        dom = args.skip or args.defer
-        kind = "skipped" if args.skip else "deferred"
-        if not args.reason:
-            print("--skip / --defer 必须带 --reason（这是人的决定）")
-            return 1
-        if not check_mod.valid_topic(dom):
-            print(f"❌ 不认识的域：{dom}")
-            return 1
-        rc.count_input()
-        topics = [t for t in topics if t.get("domain") != dom]
-        row = {"domain": dom, "state": kind, "reason": args.reason, "since": today_iso()}
-        if kind == "deferred":
-            row["until"] = add_days(today_iso(), args.days)
-        topics.append(row)
-        rc.add("✅", dom, "跳过" if kind == "skipped" else f"暂缓 {args.days} 天", args.reason)
+    e = {
+        "facts": facts, "claims": claims, "tensions": tensions, "drafts": drafts,
+        "transcript": transcript, "topics": topics, "narrows": narrows,
+        "events": events, "migrations": migrations,
+        "fid_map": fid_map, "refmap": refmap, "attach_delta": {},
+    }
+    for spec in ACTIONS:
+        if not action_trigger(spec, args):
+            continue
+        ret = spec["handler"](args, e, rc)
+        if ret:
+            return ret
+    topics = e["topics"]
+    attach_delta = e["attach_delta"]
 
-    if (args.retire or args.unretire or args.renew or args.retopic
-            or args.redact or args.narrow):
-        if args.narrow:
-            if not args.reason:
-                print("--narrow 必须带 --reason（改措辞也要留痕：原来那句哪里说宽了）")
-                return 1
-            rc.count_input()
-            narrow_claim(args.narrow.strip(), args.text, args.context, args.reason,
-                         claims, fid_map, narrows, rc)
-        if args.retire:
-            if not args.reason:
-                print("--retire 必须带 --reason（否则就是静默删除）")
-                return 1
-            for cid in id_list(args.retire):
-                rc.count_input()
-                retire_claim(cid, args.reason, claims, tensions, rc, fid_map)
-        if args.unretire:
-            for cid in id_list(args.unretire):
-                rc.count_input()
-                unretire_claim(cid, claims, rc)
-        if args.renew:
-            if not args.reason:
-                print("--renew 必须带 --reason（记下你为什么还认它）")
-                return 1
-            for cid in id_list(args.renew):
-                rc.count_input()
-                renew_claim(cid, args.reason, claims, rc)
-        if args.redact:
-            if not args.reason:
-                print("--redact 必须带 --reason（为什么遮，留给以后看）")
-                return 1
-            for sid in id_list(args.redact):
-                redact_transcript([sid], args.reason, transcript, rc)
-        if args.retopic:
-            if not args.reason:
-                print("--retopic 必须带 --reason（归档错了也要留痕：为什么它不在那儿）")
-                return 1
-            for spec in id_list(args.retopic):
-                rc.count_input()
-                retopic_claim(spec, args.reason, claims, rc)
-
-    for raw in (load_any(args.facts) if args.facts else []):
-        take_fact(raw, facts, rc, drafts, refmap)
-    for f in facts:
-        fid_map[f["id"]] = f
-
-    if args.exclude:
-        if not args.reason:
-            print("--exclude 必须带 --reason（这是人的决定，要留痕）")
-            return 1
-        unknown = exclude_facts([x.strip() for x in args.exclude.split(",") if x.strip()],
-                                args.action, args.reason, facts, rc)
-        if unknown:
-            print(f"❌ 找不到这些 fact：{unknown} —— 什么都没写")
-            return 1
-
-    attach_delta = attach_basis(args.attach, claims, facts, rc)
-    if args.detach:
-        detach_basis(args.detach, claims, facts, rc)
-    if args.rewire:
-        rewire_claims(load_any(args.rewire), claims, facts, rc)
-
-    for raw in (load_any(args.claims) if args.claims else []):
-        take_claim(raw, claims, fid_map, rc, drafts, refmap, tensions)
-
-    for raw in (load_any(args.tensions) if args.tensions else []):
-        take_tension(raw, tensions, claims, rc, drafts, refmap)
-
-    # 整批预检：这一步只该抓到"跨条"的问题（超额、重复 id、取代状态不一致）
+    # 整批预检：跨条的问题（超额、重复 id、取代状态），以及
+    # confirmed / ignored 有没有对应的独立事件
     errors, warns = check_mod.validate(facts, claims, tensions, drafts,
                                        manifest=None, require_rendered=False,
-                                       check_views=False, topics=topics)
+                                       check_views=False, topics=topics,
+                                       events=events, migrations=migrations,
+                                       transcript=transcript)
     if errors:
         print("❌ 预检失败，什么都没写：")
         for e in errors:
@@ -915,11 +1078,38 @@ def main():
         print("（--dry：以上是预演，没有写入）")
         return 0
 
-    # 原话覆盖：这一轮你说的，有没有落到事实上
+    # 决定不可静默：本轮交上来的每句原话都要有终态。
+    # 终态只有三种：落成事实、被 --ignore 显式标为不记、短到不构成内容。
+    # 没有终态就整批拒绝——「0 句没落地」不再是标个 ignored 就能刷出来的。
     fact_texts = [f["text"] for f in facts if not f.get("excluded")]
+    ignored_ids = {e.get("target") for e in events if e.get("kind") == "ignore"}
+    legacy_ignored = set()
+    for m in migrations:
+        legacy_ignored.update(m.get("ignored") or [])
+
+    def is_ignored(s):
+        return bool(s.get("ignored")) or s.get("id") in ignored_ids \
+            or s.get("id") in legacy_ignored
+
+    def unsettled(s):
+        if is_ignored(s) or len("".join(s.get("text", "").split())) < 8:
+            return False
+        return not covered_by(s.get("text", ""), fact_texts)
+
+    target = list(new_said)
+    if args.from_capture is not None:
+        target += [s for s in transcript if s.get("round") == args.from_capture]
+    missing = [s for s in target if unsettled(s)]
+    if missing:
+        print(f"❌ 本轮有 {len(missing)} 句原话没有终态，什么都没写：")
+        for s in missing[:5]:
+            print(f"   {s['id']}  {clean(s.get('text', ''), 40)}")
+        print('   落成事实，或 --ignore <id> --reason "…"。')
+        return 1
+
     cov = {"landed": 0, "ignored": 0, "short": 0, "missing": []}
-    for s in new_said:
-        if s.get("ignored"):
+    for s in target:
+        if is_ignored(s):
             cov["ignored"] += 1
         elif len("".join(s["text"].split())) < 8:
             cov["short"] += 1
@@ -934,23 +1124,25 @@ def main():
     dump_jsonl(ME / "drafts.jsonl", drafts)
     dump_jsonl(ME / "transcript.jsonl", transcript + new_said)
     dump_jsonl(ME / "topics.jsonl", topics)
+    dump_jsonl(ME / "events.jsonl", events)
+    dump_jsonl(ME / "migrations.jsonl", migrations)
     if args.narrow:
         dump_jsonl(ME / "narrows.jsonl", narrows)
 
     stat = round_stats(facts_before, facts, claims_before, claims,
-                       attach_delta, len(new_said), round_no)
+                       attach_delta, len(target), round_no)
     dump_jsonl(ME / "rounds.jsonl", rounds + [stat])
 
     st = update_state(round_no, args.topic)
 
     lost = rc.print()
-    if new_said:
-        print(f"\n你说 {len(new_said)} 句 ｜ {cov['landed']} 句落地 ｜ "
+    if target:
+        print(f"\n你说 {len(target)} 句 ｜ {cov['landed']} 句落地 ｜ "
               f"{cov['ignored']} 句标为无价值 ｜ {cov['short']} 句太短 ｜ "
               f"{len(cov['missing'])} 句没落地")
         for s in cov["missing"][:3]:
             print(f"   ⚠️ 没落地：{clean(s['text'], 40)}")
-    else:
+    elif args.facts or args.claims:
         print("\n⚠️  本轮没交 --said：无法核对「我说的话是不是都记了」")
 
     active_doms = [d for d in ("work", "methods", "goals", "values", "emotion",

@@ -20,7 +20,7 @@ TPL = ROOT / "template"
 ME = ROOT / "me"
 FILES = ["facts.jsonl", "claims.jsonl", "tensions.jsonl", "drafts.jsonl",
          "transcript.jsonl", "rounds.jsonl", "topics.jsonl", "narrows.jsonl",
-         "state.json"]
+         "events.jsonl", "migrations.jsonl", "state.json"]
 
 VIEW_IGNORE = """# 视图由 build.py 生成，不进历史；改它们没有意义
 PORTRAIT.md

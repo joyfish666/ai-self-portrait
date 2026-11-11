@@ -5,7 +5,7 @@
 先读 `SPEC.md`（结构）和 `PROTOCOL.md`（怎么问）。本文件只讲**做什么、按什么顺序、什么不许做**。
 
 > **一条铁律：你不写数据文件。**
-> 所有写入都走 `scripts/commit.py`——它负责校验、分配 id、算复核期、判重、超限拒绝、写盘、出对账单。
+> 所有写入都走 `scripts/commit.py`——它负责校验、分配 id、判重、超限拒绝、写盘、出对账单。
 > 你只交 JSON。**你手改 jsonl 的那一天，就是数据开始烂的那一天。**
 
 ## 触发词 → 动作
@@ -16,10 +16,10 @@
 | "继续画像" | 读 `me/state.json`，从 `current_topic` 续跑 |
 | "补充画像" | 只补**判断**最少的域（从 claims 现算，不看 state） |
 | "重建视图" | `python scripts/build.py` |
-| "这不对" / "不是这样" | 走否决流程（见下） |
+| "这不对" / "不是这样" | 走否决流程（见下），本人明确不认就 `--veto` |
 | "记一下" | 立刻 commit 本轮 + 出对账单 |
 | "看草稿" | `python scripts/commit.py --drafts` |
-| "有哪些到期了" / "看看复核" | `python scripts/commit.py --due`，摆 3 条，看完就停 |
+| "这条我认" / "这条不认" | `--confirm` / `--veto`，带 `--reason`（见下） |
 | "跳过这个" / "不想聊这个" | 先问是**永远不想聊**还是**今天不想聊**，再记下来（见下） |
 
 ## 用户说"不想聊"的时候
@@ -54,51 +54,95 @@ python scripts/commit.py --defer health --reason "今天不想说" --days 30
 
 ## 一轮怎么干（照这个顺序，别改）
 
-**1. 问 4–5 个问题**（问具体场景和真事，不问人格标签）。
+**1. 问 4–5 个问题**（问具体场景和真事，不问人格标签）。**必须用交互式选项弹出来**，
+不许只在文本里列 A/B/C/D 让用户手打字母；**选项本身也不带编号**。
+见 `PROTOCOL.md` 的问法模板：
 
-**2. 用户答完，你写三个临时 JSON 文件**（放仓库根，别放 `me/`）：
-
-```json
-// round_said.json —— 用户这一轮说的原话，逐句，一字不改。
-// 包括你决定"不记"的那些，也要写进来（标 ignored 说明为什么）。
-["上个月吧，我在想要不要换个方向，但一直没动。",
- "每天下班就刷手机，什么也没干。",
- {"text":"周六去超市买了点菜","ignored":"纯日常，无判断价值"}]
-
-// round_facts.json
-[{"ref":"a","date":"2026-11-07","kind":"自述","asked":"最近一次觉得在原地踏步是什么时候",
-  "text":"上个月吧，我在想要不要换个方向，但一直没动。","topic":"goals","source":"user"},
- {"ref":"b","date":"2026-11-07","kind":"行为","asked":"最近一次觉得在原地踏步是什么时候",
-  "text":"每天下班就刷手机，什么也没干。","topic":"goals","source":"user"}]
-
-// round_claims.json  —— 只写你这轮真有依据的判断，可以不写
-[{"topic":"goals","type":"disposition",
-  "text":"≤40 字，一句话判断",
-  "context":"30–150 字，必须包含 basis 原文里连续 8 个字",
-  "source":"ai","confidence":"inferred",
-  "basis":["a","f-0172"]}]
 ```
+1. 上周店里最忙那天，你到店后先做哪件事？
+   [先发面再烤第一批] [先备料等客人] [先理上一天的账] [先开门迎客]
+```
+→ 用户点「先发面再烤第一批」
 
-`ref` 是本批临时标签，`basis` 里可以写 `ref` 也可以写已存在的 `f-xxxx`。
-`review_after` 不用写，`commit.py` 按 `type` 算。`id` 不用写，它分配。
-
-**`--said` 是硬要求**：交上去的每一句都会进 `me/transcript.jsonl`，
-`commit.py` 会拿它跟事实逐句比对，对账单里直接报「你说 N 句 / M 句落地 / K 句没落地」。
-**不交 `--said`，对账单就没法证明你没漏记。**
-
-**3. 跑它：**
+**2. 先登记原话，再分拣——两次调用，不许合成一次。**
 
 ```bash
-python scripts/commit.py --said round_said.json --facts round_facts.json \
-    --claims round_claims.json --topic values
+python scripts/commit.py --capture round_said.json
 ```
 
-它一条龙做完：原话入库 → 校验 → 不合格进草稿 → 分配 id → 原子写 → `build` → `check` → `git commit` → 打印对账单。
+`round_said.json` 是**纯文本字符串数组**，逐句、一字不改。UI 点选时登记
+**返回的选项文字**，不是字母：
 
-**4. 把对账单原样贴给用户**（这是 G8 的凭据，别自己总结成"已记录"）。
+```json
+["先发面再烤第一批", "骑车去河边坐着", "周末去超市买了点菜"]
+```
+
+这里是全库**唯一逐字保留回答**的地方。退化成文本选项、用户回 `2B` 时，
+才登记 `2B` 当锚；但事实层照样要展开成选项文字。
+命令给每句分配 `s-xxxx` 并打印出来。这一阶段**只写 `transcript.jsonl` 和 `events.jsonl`**，
+不写事实、不写判断、不跑体检。带 `ignored` 字段的输入会被直接拒绝。
+
+**3. 显式决定哪些句子不记**（带理由、主体、时间，留事件）：
+
+```bash
+python scripts/commit.py --ignore s-9003 --reason "纯日常，无判断价值"
+```
+
+**4. 写两个临时 JSON 文件**（放仓库根，别放 `me/`）：
+
+```json
+// round_facts.json —— 只记用户点中的那一项文字
+// 第三句「周末去超市买了点菜」已被 --ignore，不进事实层
+[{"ref":"a","date":"2026-11-07","kind":"自述","asked":"上周店里最忙那天，你到店后先做哪件事",
+  "text":"先发面再烤第一批","topic":"work","source":"user"},
+ {"ref":"b","date":"2026-11-07","kind":"自述","asked":"空下来的一下午，你更常怎么过",
+  "text":"骑车去河边坐着","topic":"leisure","source":"user"}]
+
+// round_claims.json  —— 只写你这轮真有依据的判断，可以不写
+[{"topic":"leisure","type":"disposition",
+  "text":"≤40 字，一句话判断",
+  "context":"30–150 字，必须含依据里连续 8 个字",
+  "source":"ai","basis":["a","b"]}]
+```
+
+`ref` 是本批临时标签，`basis` 里可以写 `ref` 也可以写已存在的 `f-xxxx`；
+它会被 `commit.py` 吃掉，**不入库**。本轮不写 claim 就不用带。
+
+**事实层只记「问了什么 + 你选中的那一项」**：
+
+- `asked` = 问题本身，**不带选项表、不带编号**
+- `text` = **真正的回答**：用户点中的那项文字，如「先发面再烤第一批」。
+  **不许填 `2B`、`C` 这类编号**——它没有语义，判断的 `context` 引用不了
+- 没点中的选项也不进 `facts`；编号只可能出现在退化情形的 `transcript` 里
+- 一次点了多项要合并时，说明合并是代理做的
+- 用户额外补的自由文本照常记成事实，不走选项展开
+
+`id` 不用写，它分配；`review_after` 已废弃；`confidence` 不接受自报。
+
+**5. 跑分拣：**
+
+```bash
+python scripts/commit.py --facts round_facts.json \
+    --claims round_claims.json --from-capture 51 --topic values
+```
+
+`--from-capture` 指第几轮 capture，它会把那一轮登记的每句都查一遍终态：
+落成事实 / 被 `--ignore` 显式标为不记 / 短到不构成内容，三者必居其一。
+**有句子没终态就整批拒绝、什么都不写**，并点名是哪几句。
+
+通过之后一条龙做完：校验 → 不合格进草稿 → 分配 id → 原子写 → `build` → `check` → `git commit` → 打印对账单。
+
+**6. 把对账单原样贴给用户**（这是 G8 的凭据，别自己总结成"已记录"）。
 特别注意两行：**「你说 N 句 / K 句没落地」**和**「📈 某域 判断+0 依据+N（在深化）」**。
 
-**5. 删掉临时 JSON 文件。**
+**7. 删掉临时 JSON 文件。**
+
+> **兼容路径**：`--said` 仍收纯文本原话（走完整流程），但不再接受
+> `{"text":…, "ignored":…}`。新流程一律用 `--capture` + `--from-capture`。
+>
+> **诚实的限度**：同一个 agent 分两次调用，理论上仍可以第一步就少交一句。
+> 这一刀**不证明没漏记**，只保证交上来的每句都有可见终态、且不能在同一次调用里
+> 被顺手抹掉。别把它写成"独立记录"。
 
 ## 分拣：五件事（这是你最自由的环节，也是最容易漂的环节）
 
@@ -108,7 +152,7 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
 
 - 记：里面有一条将来可能被引用的信息——做了什么事、怎么想、什么反应、什么偏好
 - 不记：寒暄、追问、"嗯/然后呢"、已经记过的重复
-- **不记也要写进 `round_said.json`**，标 `"ignored": "为什么"`。否则它就成了"漏记"，对账单会报出来
+- **不记要走 `--ignore s-xxxx --reason "…"` 显式动作**。否则它就是"没终态"，下一次分拣会被整批拒绝并点名
 - **从聊天记录/日志里补事实时，多问一句：换个用户来，这句话还会出现吗？**
   会（"继续""好，你做""123做"）→ 不记，那是流程不是他；
   不会（"没有可以不提出""这个区别是怎么造成的"）→ 记，那是他的方式。
@@ -118,12 +162,12 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
 
 - 一句话里"想法"和"做法"分开记（`kind` 不同，判矛盾时要分开看）
 - 不同主题分开记
-- 但**别一句话一条**——那是流水账，没有引用价值。同一件事的几句话，合成一条更长的原话是可以的
+- 但**别一句话一条**——那是流水账，没有引用价值。同一件事的几句话，合成一条更完整的事实内容是可以的
 - **`kind` 别顺手写 `自述`**：回答"关于你自己"的问题 → `自述`；干活时下的令、做的选择 → `行为`。
   这个字段是将来区分"他讲自己"和"他指挥工作"的唯一依据——`source` 只有 user/ai/external，分不出来
 - **`AI观察` 只能记"能被一张截图证明的东西"**，不能记"我推出来的结论"：
   「他当天交出了一页纸」——能（真有那一页纸）；「他有两个发动机」——不能（那是读出来的结论，该写成 `claim`）。
-  这个口子被滥过 61 次，后来全部被排除，理由统一写着"推论，非画像内容"。**它的危险在于最省事**：
+  这个口子曾被大量滥用，后来全部被排除，理由统一写着"推论，非画像内容"。**它的危险在于最省事**：
   `asked` 可以为空、不需要原话、不需要 8 字片段，所以一遇到"这句话我归不到任何原话上"就会往里倒。
   （`asked` 的例外已经堵掉了；现在还有一条 `check` 会报：**依据全是我观察到的、没有一句他的原话**）
 
@@ -133,7 +177,7 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
 
 | 情况 | 动作 |
 |---|---|
-| 能，是同一个模式的又一个例子 | **追加**：`--attach c-023:f-0180`，不新建 |
+| 能，是同一个模式的又一个例子 | **追加**：`--attach c-923:f-9180`，不新建 |
 | 不能，但也不冲突 | 可能该拆出一条更细的判断 |
 | 不能，而且顶着来 | 走四步判定（时间 → 语境 → 自述vs行为 → 才是矛盾） |
 | 旧判断其实错了 | **新建 + `supersedes` + `reason`**，旧的不改 |
@@ -155,7 +199,7 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
 最常犯的是第二条：从"他要 AI 表态"推成"他要人承担判断"。**对 AI 的态度不等于对人的态度。**
 想把判断升到"他这个人怎样"，得有别场合的证据，或者他明确说过。
 
-`commit.py` 会问一句（不拦）：`⚠️ c-081 落在 values，但依据全来自干活现场 —— 这条是不是写高了？`
+`commit.py` 会问一句（不拦）：`⚠️ c-981 落在 values，但依据全来自干活现场 —— 这条是不是写高了？`
 
 ## 否决流程
 
@@ -163,37 +207,39 @@ python scripts/commit.py --said round_said.json --facts round_facts.json \
 
 1. **先问是哪不对**：事实错 / 理解偏 / 判断不认
 2. **事实错** → 新增一条纠正 fact；旧的那条：
-   `python scripts/commit.py --exclude f-0172 --action archived --reason "用户说记错了，其实是…"`
+   `python scripts/commit.py --exclude f-9172 --action archived --reason "用户说记错了，其实是…"`
 3. **理解偏 / 判断不认** → 写一条新 claim，`supersedes: ["c-0041"]` + `reason: "为什么改"`
 4. **不要辩解，不要解释你为什么这么写**
 
-## 判断到期了 / 不用了，怎么办
+## 判断过时了 / 不认了，怎么办
 
-到期（视图里带 ⏳）不是"该更新"，是"该看一眼"。看完有四种收场，**别只会一种**：
+**没有复核期，也没有到期队列。** `review_after` 已删：固定 `since+365` 会把同一批建的
+判断挤到同一个月，造出一个永远还不完的队列，而
+「一个理由带走一批续期」恰好绕过逐条复核。
 
-| 看完的结论 | 动作 | 结果 |
-|---|---|---|
-| 还成立，而且这轮有新证据 | `--attach c-013:f-0180` | 证据变新（复核期不动） |
-| 还成立，但没新证据（我确认过） | `--renew c-013 --reason "现在还是这样"` | 复核期往后推 90/365 天 |
-| 不成立了，我有新结论 | 写新 claim + `supersedes` + `reason` | 旧的进「曾经认为」 |
-| 不成立了，但我写不出替代 | `--retire c-013 --reason "毕业后就没有导师这个角色了"` | 旧的进「已退役」 |
-| 本来就没意义了 | `--retire c-013 --reason "…"` | 同上 |
+现在的做法只有一条：**CONTEXT 里每条判断带信息年龄，超过 180 天标 `· 旧`。
+用到它的时候先确认还成不成立——用到时才响，不排队、不催、不续命。**
+
+本人表态是独立的决定，都留事件（`me/events.jsonl`）：
 
 ```bash
-python scripts/commit.py --due                    # 今天先摆 3 条到期的
-python scripts/commit.py --due 5                  # 摆 5 条
-python scripts/commit.py --renew c-013 --reason "现在还是每周 40 小时"
-python scripts/commit.py --renew c-013,c-014,c-015 --reason "这批都还是这样"   # 一批
-python scripts/commit.py --retire c-013 --reason "读研才有的角色，毕业就没了"
-python scripts/commit.py --unretire c-013          # 退错了，放回来
-python scripts/commit.py --retopic c-038:work --reason "这是能力状况，不是协作规则"   # 归档写错了
-python scripts/commit.py --retopic c-038:work,c-060:work,c-068:work --reason "这三条都是日常怎么做"  # 一批
+python scripts/commit.py --confirm c-913 --reason "现在还是这样" --by user
+python scripts/commit.py --veto    c-913 --reason "早就不是了"   --by user
+python scripts/commit.py --attach c-913:f-9180    # 有新证据，让依据变新
+python scripts/commit.py --retire c-913 --reason "读研才有的角色，毕业就没了"
+python scripts/commit.py --unretire c-913          # 退错了，放回来
+python scripts/commit.py --retopic c-938:work --reason "归档写错了"
 ```
+
+- `--confirm` → `confidence=confirmed` + 一条 confirm 事件
+- `--veto` → `confidence=unconfirmed`（视图标 🔶）+ 一条 veto 事件
+- **`confirmed` 不接受提交方自报**：写 claim 时填了会被降级；没有事件、
+  也不在 `migrations.jsonl` 豁免名单里的 confirmed 会被 `check` 判为错误
 
 **判断说得比证据远，用 `--narrow`，别用 supersede：**
 
 ```bash
-python scripts/commit.py --narrow c-069 \
+python scripts/commit.py --narrow c-969 \
     --text '把执行类工作看得很轻，更看重"想出方案"' \
     --context '他说揉面、上架、收银"谁干都行，不差我一个"——是说自己该干别的，不是说这些活不算活。' \
     --reason '"只认"是推断，原话只说了相对不贵'
@@ -202,14 +248,14 @@ python scripts/commit.py --narrow c-069 \
 说宽了的话常常**同时写在 `text` 和 `context` 里**，标题和说明要一起换（`--context` 可选，
 换完仍要过 30–150 字和依据 8 字原话片段校验）。只改标题，画像下面那段还在说宽话。
 
-它**只改 `text`（和可选的 `context`）**：不产生新 id、不进「曾经认为」、不动依据和复核期、不让依据掉回消化债。
+它**只改 `text`（和可选的 `context`）**：不产生新 id、不进「曾经认为」、不动依据和 `since`、不让依据掉回消化债。
 `--reason` 必填，旧文 / 新文 / 理由进 `me/narrows.jsonl`，渲染在 `REVISIONS.md` 的「措辞修正」一节；
 `me/` 内层 git 仓每轮自动提交，改动都有 diff 可查。
 
 **分清楚三个动作**：同一件事说宽了 → `--narrow`；判断真的错了、要换成另一个说法 →
 新 claim + `supersedes` + `reason`；只是归档写错 → `--retopic`。
 
-**`--retopic` 是"归档写错了"，不是四种收场之一。** 它只改 `topic` 一个字段：
+**`--retopic` 只用于"归档写错了"。** 它只改 `topic` 一个字段：
 判断不退出在役、不进「曾经认为」、不产生两条一模一样的句子。
 所以**别为了挪域去 supersede**——那会在画像里留下两条同义的话。
 
@@ -217,7 +263,7 @@ python scripts/commit.py --narrow c-069 \
 
 ```bash
 # 一次修一条：撤掉一条接错的依据（撤完必须还剩 ≥1 条）
-python scripts/commit.py --detach c-055:f-0093
+python scripts/commit.py --detach c-955:f-9093
 
 # 一次修一整条：换依据 + 换 context，三件事一起做完
 python scripts/commit.py --rewire rewire.json
@@ -226,30 +272,25 @@ python scripts/commit.py --rewire rewire.json
 `rewire.json` 长这样：
 
 ```json
-[{"id": "c-055", "add": ["f-0085", "f-0053"], "del": ["f-0093"],
-  "context": "两处说的是同一件事：他说「面团发不起来，先别急着加酵母」……",
+[{"id": "c-955", "add": ["f-9085", "f-9053"], "del": ["f-9093"],
+  "context": "两个循环同源：他说「最怕发面发过头，一整批都废了」……",
   "reason": "原来那条依据是我写的结论，不是他的话"}]
 ```
 
-**为什么必须是"一个动作"**：`context` 里引的是依据原话。换了依据，`context` 往往也引错了对象——
+**为什么必须是"一个动作"**：`context` 里引的是依据内容。换了依据，`context` 往往也引错了对象——
 拆成 `--attach` + `--detach` 两步，中间那个状态 `context` 指着一条已经被撤掉的依据，预检会拦。
 **换线＝依据 + context 一起换。**
 
 **什么时候该修线**：判断的 `basis` 里混着 `kind=AI观察` 的事实，而那条其实是**我写的结论**
 （「核心洞察：…」「关键机制：…」），真正的原话在库里躺着。这不是清理，是**把线接到该接的地方**。
 
-**到期是队列，不是欠债。** 先跑 `--due` 摆出 3 条，**看完这 3 条就停**——
-剩下多少它自己会说（`剩下 N 条排着`）。一次把 18 条全摆给用户，就是在拿系统的事烦他。
-
-**一个理由可以带走一批**：`--renew c-013,c-014,c-015 --reason "…"` 只出一份对账单、
-一次 build、一个 commit。别让用户为同一个理由跑三遍命令。
-
 **规矩**：
 - 退役**必须写理由**，否则就是静默删除；理由会出现在 `REVISIONS.md` 的「已退役」里
 - 退役**不删依据**，不占 60 名额，不在画像正文出现（画像末尾只留一行计数）
 - **挂在张力两端的判断不能退役**——先用 `tension.py --close` 把张力收场
-- **证据和寿命是两件事**：`--attach` 只让证据变新，不延长复核期；要延必须 `--renew` 并开口说"我还认它"
-- **续期从"今天"重新起算**，不是从 `since`——一条半年前的状态今天续，就再活 90 天
+- **证据和表态是两件事**：`--attach` 只让依据变新；要写"我认它"就得 `--confirm` 并开口
+- 迁移前的历史 confirmed / ignored 固化在 `migrations.jsonl` 里，
+  `check` 只对这份**写死的名单**豁免；新写入一律要有事件，口子不会扩散
 
 ## 判断变多时怎么办
 
@@ -282,10 +323,10 @@ python scripts/commit.py --rewire rewire.json
 ## 硬性规则（违反即失败）
 
 1. **不问人格标签**，只问具体场景和真事
-2. **推断必须标 `inferred`**，且必须请他确认
+2. **推断一律 `inferred` / `unconfirmed`**；本人点头走 `--confirm`（留事件），不许在 claim 里写 `confirmed`
 3. 他说"不想说 / 跳过 / 换一个" → **立刻换话题，不追问**
 4. 每条 claim 必须带 `basis` 和 `context`
-5. `source=ai` 时 `confidence` 不得为 `confirmed`（`commit.py` 会自动降级并告诉你）
+5. **`confidence=confirmed` 只能由 `--confirm` 事件产生**：自报会被降级；无事件、也不在迁移名单里的会被 `check` 判错
 6. **遇到前后不一致，走四步判定**（时间 → 语境 → 自述vs行为 → 才是矛盾）
 7. **不主动问隐私**：姓名、证件、住址、第三方的私事，不主动探、不追问。
    用户自己说到的，**照实记**（反正只存在本地），但要克制：不为它开新话题
@@ -332,7 +373,8 @@ python scripts/check.py          # 一圈体检
 **改过 `scripts/` 里任何一行，都要跑一遍：**
 
 ```bash
-python scripts/selftest.py       # 把八条承诺逐条验一遍，用例数随功能增加，约 4 分钟（给足超时）
+python scripts/selftest.py       # 两层全跑（秒级 unit + 12 个 e2e），约 1 分钟（给足超时）
+python scripts/selftest.py --unit  # 只跑秒级层，改纯逻辑时先跑这个
 ```
 
 它用**虚构数据**在临时目录里从零建仓，把八条承诺逐条验一遍。**不全绿就等于改坏了**——
@@ -345,8 +387,8 @@ python scripts/digest.py 5       # 挑 5 条未消化的事实，变成 claim �
 python scripts/suggest.py        # 给判断推荐候选依据（算法召回，人确认）
 
 python scripts/tension.py --worksheet    # 按域摆出全部判断
-python scripts/tension.py --add c-029 c-026 "一句话描述"
-python scripts/tension.py --close t-001 --reason "已经决定：先按 35 万谈"
+python scripts/tension.py --add c-929 c-926 "一句话描述"
+python scripts/tension.py --close t-901 --reason "已经决定：先按 35 万谈"
 python scripts/tension.py --check
 ```
 
@@ -360,8 +402,8 @@ python scripts/tension.py --check
 **所以：取代或退役一条判断，会让它的依据掉回债里。** 对账单会当场告诉你：
 
 ```
-🚪 c-013 退役  理由…（让 2 条依据没人用了：f-0081、f-0082）
-✅ c-070 新增判断  …（被取代的依据里，有 1 条没人用了：f-0114）
+🚪 c-913 退役  理由…（让 2 条依据没人用了：f-9081、f-9082）
+✅ c-970 新增判断  …（被取代的依据里，有 1 条没人用了：f-9114）
 ```
 
 看到这句就去想：那几条是**该标 archived（旧的读法）**，还是**该挂到新判断上**。别等到 30 天后被点名才想起。
@@ -373,7 +415,7 @@ python scripts/tension.py --check
 ```
 📒 未消化 1 笔 ｜ 最老 25 天
    现在可能能挂上了：
-   c-001「想动但不动，卡在启动不在方向」重合 4 → --attach c-001:f-0002
+   c-901「想动但不动，卡在启动不在方向」重合 4 → --attach c-901:f-9002
 ```
 
 | 债龄 | 你要做什么 |
@@ -387,12 +429,12 @@ python scripts/tension.py --check
 
 ```bash
 # 1. 挂上去
-python scripts/commit.py --attach c-071:f-0192
+python scripts/commit.py --attach c-971:f-9192
 
-# 2. 立一条新判断（它可能在讲一件你还没写下的事）—— 写 claim，basis 放 f-0192
+# 2. 立一条新判断（它可能在讲一件你还没写下的事）—— 写 claim，basis 放 f-9192
 
 # 3. 标废（真实，但没有判断价值）
-python scripts/commit.py --exclude f-0192 --reason "无判断价值：食堂换承包商对我没影响"
+python scripts/commit.py --exclude f-9192 --reason "无判断价值：食堂换承包商对我没影响"
 ```
 
 **注意 noise 的意思**：不是"这句是假的"，是"真实但没有判断价值"。所以第 30 天再标它，

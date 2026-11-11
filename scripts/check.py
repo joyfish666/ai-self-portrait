@@ -42,8 +42,10 @@ SOFT_DISP, HARD_DISP = 60, 150
 SOFT_STATE, HARD_STATE = 40, 100
 TEXT_MAX, CTX_MIN, CTX_MAX, FACT_MAX = 40, 30, 150, 1000
 FRAG = 8
-# 复核期用区间而不是固定偏移：抓"复制粘贴写错"，不卡合理的半年期状态
-REVIEW_DAYS = {"state": (60, 200), "disposition": (300, 400)}
+# 复核期已废：它是 since 的派生值。固定 +365 天会把同一批建的判断挤到
+# 同一个月到期，制造一个永远还不完的队列。
+# 年龄在视图里现算，用到时再判断，不排队、不催、不续命。
+STALE_DAYS = 180
 VIEWS = ("PORTRAIT.md", "CONTEXT.md")
 
 
@@ -60,7 +62,8 @@ def valid_topic(t):
 
 
 def validate(facts, claims, tensions, drafts, *, manifest=None,
-             require_rendered=True, check_views=True, today=None, topics=None):
+             require_rendered=True, check_views=True, today=None, topics=None,
+             events=None, migrations=None, transcript=None):
     """返回 (errors, warns)。commit.py 用 require_rendered=False 预检。"""
     errors, warns = [], []
     today = today or date.today().isoformat()
@@ -142,11 +145,6 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
                 err(f"claim {i} 退役了但没写 retired_reason —— 那就是静默删除")
             if not _is_iso(c.get("retired_at")):
                 err(f"claim {i} retired_at 不是 YYYY-MM-DD")
-        if c.get("renewed_at") is not None:
-            if not _is_iso(c.get("renewed_at")):
-                err(f"claim {i} renewed_at 不是 YYYY-MM-DD")
-            if not c.get("renewed_reason"):
-                err(f"claim {i} 续期了但没写 renewed_reason")
         if c.get("source") not in SOURCES:
             err(f"claim {i} source 非法：{c.get('source')}")
         if len(c.get("text", "")) > TEXT_MAX:
@@ -161,30 +159,10 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
         for b in basis:
             if b not in fid:
                 err(f"claim {i} basis 悬空：{b}")
-        if c.get("source") == "ai" and c.get("confidence") == "confirmed":
-            err(f"claim {i} 红线：source=ai 不得 confidence=confirmed")
-
-        # 复核期：日期格式 + type 决定的区间
+        # confirmed 不再靠 source 代理判断：它由 events.jsonl 的 confirm 事件决定，
+        # 统一在下面的「事件化」一节校验。
         if not _is_iso(c.get("since")):
             err(f"claim {i} since 不是 YYYY-MM-DD：{c.get('since')!r}")
-        ra = c.get("review_after")
-        t = c.get("type")
-        if ra is not None and not _is_iso(ra):
-            err(f"claim {i} review_after 不是 YYYY-MM-DD：{ra!r}")
-        elif ra is None:
-            if t in ("state", "disposition"):
-                err(f"claim {i} type={t} 必须带 review_after")
-        else:
-            if t in ("constant", "inference"):
-                err(f"claim {i} type={t} 的 review_after 必须为 null")
-            elif _is_iso(c.get("since")):
-                # 续期把时钟拨到"我还认它的那天"：从 renewed_at 起算，否则老判断
-                # 续一次就必然越界（since 越老，跨度越大），等于不许续期。
-                anchor = c.get("renewed_at") if _is_iso(c.get("renewed_at")) else c["since"]
-                days = (to_date(ra) - to_date(anchor)).days
-                lo, hi = REVIEW_DAYS[t]
-                if not (lo <= days <= hi):
-                    err(f"claim {i} 复核期 {days} 天，type={t} 应在 {lo}–{hi} 天")
 
         # 依据有效性：被引用为 noise 是错误；只引用了已排除的事实是警告
         src_text = "".join(fid[b]["text"] for b in basis if b in fid)
@@ -194,7 +172,7 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
         elif live_basis and len(live_basis) < len(basis):
             warn(f"claim {i} 有依据已被排除：{sorted(set(basis) - set(live_basis))[:3]}")
         if basis and src_text and not has_fragment(c.get("context", ""), src_text, FRAG):
-            err(f"claim {i} context 未包含任何 basis 原话片段（{FRAG} 字）")
+            err(f"claim {i} context 未包含任何依据的连续片段（{FRAG} 字）")
         # 观察可以是证据，不能是唯一的证据。
         # 一格"我看到的"如果单独撑起一条判断，就成了用我的眼睛代替他的嘴——
         # 历史上那 14 条就是这么出事的：没有原话，就往 AI观察 里倒结论。
@@ -215,6 +193,34 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
         for w in FORBIDDEN:
             if w in c.get("text", "") or w in c.get("context", ""):
                 err(f"claim {i} 出现禁词「{w}」")
+
+    # ---------- 事件化：confirmed / ignored 不许自报 ----------
+    events = events or []
+    migrations = migrations or []
+    transcript = transcript or []
+    confirmed_ev = {e.get("target") for e in events if e.get("kind") == "confirm"}
+    ignored_ev = {e.get("target") for e in events if e.get("kind") == "ignore"}
+    legacy_conf, legacy_ign = set(), set()
+    for m in migrations:
+        if m.get("kind") == "legacy":
+            legacy_conf.update(m.get("confirmed") or [])
+            legacy_ign.update(m.get("ignored") or [])
+    for c in claims:
+        if (c.get("status") == "active" and c.get("confidence") == "confirmed"
+                and c["id"] not in confirmed_ev and c["id"] not in legacy_conf):
+            err(f"claim {c['id']} 标了 confirmed 但没有 --confirm 事件，"
+                f"也不在迁移豁免名单里 —— 不许自报确认")
+    for s in transcript:
+        if (s.get("ignored") and s.get("id") not in ignored_ev
+                and s.get("id") not in legacy_ign):
+            err(f"transcript {s.get('id')} 标了 ignored 但没有 --ignore 事件，"
+                f"也不在迁移豁免名单里 —— 不许静默丢弃")
+    for e in events:
+        if not e.get("kind") or not e.get("target") or not e.get("at"):
+            err(f"event {e.get('id', '?')} 缺 kind / target / at")
+    stale_ra = [c.get("id") for c in claims if "review_after" in c]
+    if stale_ra:
+        warn(f"{len(stale_ra)} 条判断还带着已废弃的 review_after —— 跑 --migrate 清掉")
 
     # superseded 的目标必须真的被标成 superseded
     claimed_by = {x for c in claims for x in (c.get("supersedes") or [])}
@@ -286,9 +292,9 @@ def validate(facts, claims, tensions, drafts, *, manifest=None,
 
     # 过期不再是"警告"：时间到了不等于该更新，用的时候看年龄（CONTEXT 里带 ·3月前）
 
-    dup = [(a["id"], b["id"], round(difflib.SequenceMatcher(None, a["text"], b["text"]).ratio(), 2))
-           for i, a in enumerate(active) for b in active[i + 1:]
-           if difflib.SequenceMatcher(None, a["text"], b["text"]).ratio() > 0.8]
+    # 三处判重统一走 contain()：它带「不足 6 字不参与」的保护。
+    # 以前这里直接裸比原文，短判断会算出虚高相似度，于是写入说不像、体检说像。
+    dup = duplicate_pairs(claims)
     if dup:
         warn(f"{len(dup)} 组判断疑似重复，建议合并：{dup[:3]}")
 
@@ -371,13 +377,25 @@ def contain(a, b):
     """两条判断的字面相似度（0–1）。
 
     用 difflib 而不是 bigram 重合：判断只有十几个字，bigram 在这么短的串上要么失效
-    （不足 8 个 bigram 直接归零），要么被模板化文本骗到 0.9 以上。实测：
-    真实 56 条判断两两最高只有 0.31，所以 0.75 这个线不会误报。
+    （不足 8 个 bigram 直接归零），要么被模板化文本骗到 0.9 以上。
+    0.75 留的是「同一件事换了个说法」的余量，比它低的不报。
     """
     a, b = str(a or ""), str(b or "")
     if len(a) < 6 or len(b) < 6:
         return 0.0
     return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def duplicate_pairs(claims, threshold=0.75):
+    """校验层的「疑似重复」：和坏味道、写入判重用同一把尺子。"""
+    active = [c for c in claims if c.get("status") == "active"]
+    out = []
+    for i, a in enumerate(active):
+        for b in active[i + 1:]:
+            s = contain(a.get("text", ""), b.get("text", ""))
+            if s >= threshold:
+                out.append((a["id"], b["id"], round(s, 2)))
+    return out
 
 
 def smell_report(claims, facts, today=None):
@@ -422,16 +440,8 @@ def smell_report(claims, facts, today=None):
             bits += "（" + "、".join(c["id"] for c in soft[:3]) + "…）"
         out.append(("🕳️", f"单点依据 {len(thin)} 条", bits))
 
-    # ③ 到期集中：那一天/那一个月会一起压过来
-    by_month = {}
-    for c in active:
-        ra = c.get("review_after")
-        if ra:
-            by_month[ra[:7]] = by_month.get(ra[:7], 0) + 1
-    for m, n in sorted(by_month.items()):
-        if n >= 10:
-            out.append(("⏰", f"{m} 到期 {n} 条",
-                        f"约 {(n + 2) // 3} 次 --due 才看完 —— 这就是「轰炸」的样子"))
+    # ③ 到期集中已废：复核期不再入库，也就没有「同一个月挤一堆」这回事了。
+    #    过期改由 CONTEXT 里的信息年龄提示，用到时才响，不排队。
 
     # ④ 域失衡：码率全挤在一块，别的域没被说
     tot = len(active)
@@ -455,11 +465,14 @@ def main():
     tensions, drafts = load("tensions.jsonl"), load("drafts.jsonl")
     transcript, rounds = load("transcript.jsonl"), load("rounds.jsonl")
     topics = load("topics.jsonl")
+    events = load("events.jsonl")
+    migrations = load("migrations.jsonl")
     bj = ME / ".build.json"
     manifest = json.loads(bj.read_text(encoding="utf-8")) if bj.exists() else None
 
     errors, warns = validate(facts, claims, tensions, drafts, manifest=manifest,
-                             topics=topics)
+                             topics=topics, events=events, migrations=migrations,
+                             transcript=transcript)
 
     # 当前域被跳过/暂缓了，但 state 还指着它
     cur = None

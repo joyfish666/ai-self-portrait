@@ -31,6 +31,8 @@ TOPIC_NAME = {
     "relations": "重要他人", "leisure": "兴趣与消费", "misc": "其他",
 }
 CONF_RANK = {"confirmed": 0, "inferred": 1, "unconfirmed": 2, "unsure": 3}
+# 判断超过这个天数，CONTEXT 里标「· 旧」。不是「该更新」，只是用到时先确认。
+STALE_DAYS = 180
 TYPE_RANK = {"constant": 0, "state": 1, "disposition": 2, "inference": 3}
 CONTEXT_MAX_LINES = 150   # 硬上限（安全网）
 JUDGED = ("disposition", "inference")
@@ -69,8 +71,7 @@ def marks(c, today):
         m += " ❓"
     if c.get("confidence") in ("inferred", "unsure", "unconfirmed"):
         m += " 🔶"
-    if c.get("review_after") and c["review_after"] < today:
-        m += " ⏳"
+    # ⏳ 已废：日历复核会制造队列。年龄在正文尾部现算，用到时才响。
     return m
 
 
@@ -84,7 +85,7 @@ def sort_key(c):
 def meta_line(c):
     basis = c.get("basis", [])
     bits = [f"`{c.get('id','?')}`", f"`{c.get('confidence','?')}`", f"`{c.get('type','?')}`"]
-    bits.append(f"复核 {c['review_after']}" if c.get("review_after") else "长期有效")
+    bits.append(f"记录于 {c['since']}" if c.get("since") else "无日期")
     ids = "、".join(basis[:2]) + ("…" if len(basis) > 2 else "")
     bits.append(f"依据 {len(basis)} 条（{ids}）")
     return " · ".join(bits)
@@ -128,7 +129,8 @@ def render_portrait(claims, tensions, today, sess=None, topics=None):
     disp = [c for c in judged if c.get("type") in JUDGED]
     states = [c for c in judged if c.get("type") == "state"]
     level, cnt = compute_level(judged)
-    overdue = sum(1 for c in judged if c.get("review_after") and c["review_after"] < today)
+    stale = [c for c in judged
+             if (age_days(c.get("since"), today) or 0) >= STALE_DAYS]
     # interface 不进画像正文：它讲的是"这份画像怎么建"，不是"他是什么样的人"。
     # 只进 CONTEXT.md——下次接着建的人要读它，人在画像里不该看到说明书。
     body = [c for c in judged if c.get("topic") != "interface"]
@@ -138,7 +140,7 @@ def render_portrait(claims, tensions, today, sess=None, topics=None):
     L.append(f"> {rnd}{len(disp)} 条判断 · {len(states)} 条状态 · {len(consts)} 条背景 · "
              f"完整度 {level}（覆盖 {sum(1 for d in DOMAINS if cnt[d])}/{len(DOMAINS)}） · "
              f"{len([t for t in tensions if t.get('status')=='open'])} 条未解张力 · "
-             f"{overdue} 条待复核")
+             f"{len(stale)} 条超过 {STALE_DAYS} 天")
     L.append("")
 
     body_syn, stale = read_synthesis(claims)
@@ -245,7 +247,8 @@ def render_context(claims, tensions, today, facts=None):
     judged = [c for c in active if c.get("type") != "constant"]
     disp = [c for c in judged if c.get("type") in JUDGED]
     states = [c for c in judged if c.get("type") == "state"]
-    overdue = sum(1 for c in judged if c.get("review_after") and c["review_after"] < today)
+    stale = [c for c in judged
+             if (age_days(c.get("since"), today) or 0) >= STALE_DAYS]
 
     head = ["# 关于我（给 AI 的上下文）", ""]
     # 「硬规则」里"关于他"的部分从 interface 域的判断现算——代码里不再存副本。
@@ -259,11 +262,12 @@ def render_context(claims, tensions, today, facts=None):
     head += [
         "- 不要把推断当事实；不确定就说不确定。",
         "- 超过 30 天的信息后面会带 ·3月前 这样的年龄；用它回答前先说一句。",
+        f"- 判断超过 {STALE_DAYS} 天会带 ·旧；这不是「该更新」，只是用到时先确认还成不成立。",
         "",
         "## 标记",
-        "🔶 未确认 · ❓ 歧义 · ⏳ 待复核",
+        f"🔶 未确认 · ❓ 歧义 · ·旧 超过 {STALE_DAYS} 天",
         "",
-        f"_{len(disp)} 条判断 · {len(states)} 条状态 · {overdue} 条待复核_",
+        f"_{len(disp)} 条判断 · {len(states)} 条状态 · {len(stale)} 条超过 {STALE_DAYS} 天_",
         "",
     ]
     if consts:
@@ -284,6 +288,8 @@ def render_context(claims, tensions, today, facts=None):
             body += [(f"## {TOPIC_NAME.get(cur, cur)}", False), ("", False)]
         age = evidence_age(c, byid, today)
         tail = f" · {age}" if age else ""
+        if (age_days(c.get("since"), today) or 0) >= STALE_DAYS:
+            tail += " · 旧"
         body.append((f"- {c['text']}{marks(c, today)}{tail}", c.get("type") == "state"))
     body.append(("", False))
 

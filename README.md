@@ -20,11 +20,11 @@
 他说「每天在开会、写需求文档、看数据，很久没自己动手做过东西了」——
 不满的不是忙，是没有自己的产出。
 
-`c-005` · `inferred` · `disposition` · 复核 2027-11-05 · 依据 1 条（f-0001）
+`c-905` · `inferred` · `disposition` · 记录于 2026-11-05 · 依据 1 条（f-9001）
 ```
 
-**注意最后那行 `依据 1 条（f-0001）`。** 每条判断都能点回到你的原话。
-判断可以被推翻，原话不能被改写。
+**注意最后那行 `依据 1 条（f-9001）`。** 每条判断都能点回到一条事实。
+判断可以被推翻；你当时说的逐字原话留在 `transcript`，只追加、不改写。
 
 ---
 
@@ -40,14 +40,17 @@ python scripts/init.py
 
 在 agent（DeepSeek Harness / Claude Code / Cursor 都行）里打开这个目录，然后说：
 
-> **请阅读这个项目，帮我构建一个我个人用户画像**
+> **读一下这个项目，然后按它的协议问我问题**
 
-它会读 `AGENTS.md`，按 `PROTOCOL.md` 一轮轮问你，每轮 4–5 个问题。
+它会读 `AGENTS.md`，按 `PROTOCOL.md` 一轮轮问你，每轮 4–5 个问题，**用可点的选项弹出来**，不用你手打 A/B/C/D。
 
 **聊两轮就有一份能用的画像**，聊到十轮能拿去做复盘。
 
 > **代理不直接写数据文件。** 每轮它只交一份 JSON，由 `scripts/commit.py`
-> 校验、编号、算复核期、写盘、出对账单。校验不过的进草稿区，不污染正式层，也不丢。
+> 校验、编号、写盘、出对账单。校验不过的进草稿区，不污染正式层，也不丢。
+>
+> 每轮分两次调用：先 `--capture` 只登记原话，再 `--from-capture` 交分拣结果。
+> 「这句不记」和「这条我认」都是独立动作，带理由、主体和时间，不留暗账。
 
 ---
 
@@ -55,8 +58,8 @@ python scripts/init.py
 
 | 层 | 放什么 | 规矩 |
 |---|---|---|
-| **事实** `facts.jsonl` | 你的原话，逐字 | **只追加，永不改写**。要更正就新增一条 |
-| **判断** `claims.jsonl` | 一句话结论（≤40 字）+ 为什么 + 依据指针 | 必须挂事实当依据；有复核期；能推翻 |
+| **事实** `facts.jsonl` | 问了什么 + 你点中的那一项文字（选项编号、未选项不入库） | **只追加，永不改写**。要更正就新增一条 |
+| **判断** `claims.jsonl` | 一句话结论（≤40 字）+ 为什么 + 依据指针 | 必须挂事实当依据；带记录日期；本人能确认、否决、推翻 |
 | **视图** `PORTRAIT.md` / `CONTEXT.md` | 渲染结果 | **每次重算**，手改会被当场报错 |
 
 判断被推翻时不是删除，而是分成三处：**曾经认为**（supersedes，划掉并写"改为…"）、
@@ -78,11 +81,11 @@ python scripts/init.py
 | G1 | 写入即合法 | 只走 `commit.py`：schema + 引用 + 片段 + 日期 + 去重；不合格进草稿 |
 | G2 | 视图零维护 | 视图只由脚本生成；`check` 比对哈希，手改当场报错 |
 | G3 | 中断即完整 | L0/L1/L2 分层 + `state.json` 断点，随时停随时续 |
-| G4 | 过期必可见 | `review_after` 由 `type` 算出（状态 90 天 / 判断 365 天）+ ⏳ 标记 |
+| G4 | 年龄必可见 | 每条判断带记录日期与信息年龄；超过 180 天标「· 旧」，用到时才确认 |
 | G5 | 零概念负担 | 你只做两件事：**回答**、**否决** |
 | G6 | 不靠上限拦人 | 60 条是**软线**（只提示），安全网 150 才拒；真正的管理靠"坏味道"（见下） |
 | G7 | 一秒体检 | `check.py`，纯代码，不调 LLM |
-| G8 | 不静默丢失 | 每条输入有终态；对账单里的"丢失"是**减法算出来的**，不是承诺 |
+| G8 | 决定不可静默 | 原话先登记、每句必须有终态；确认与忽略都留独立事件；`confirmed` 不许自报 |
 
 **注意这八条都是账目保证**：保证不丢、不改、可定位、可重算。
 它们不保证任何一条判断写得对，也不保证画像像你。判断准不准只靠你逐条否决，
@@ -103,7 +106,6 @@ python scripts/init.py
 |---|---|
 | 🔁 **重复** | 同域两条判断在说同一件事（≥75% 像）→ 合并 |
 | 🕳️ **单点依据** | 一条判断只有一条依据，而那条还是压缩过的摘要 → 那条一更正它就悬空 |
-| ⏰ **到期集中** | 某个月到期 ≥10 条 → 复核不是流，是雪崩 |
 | ⚖️ **域失衡** | 某域占 ≥35% → 码率全给一块了，别的域没被说过 |
 
 写新判断时还有一道门：**和同域已有判断 ≥92% 像，直接打回草稿**（"合进那条，
@@ -131,7 +133,7 @@ python scripts/init.py
 `methods` 是**方式轴**，不是场景轴——它跨场景：一个人审方案要先看漏洞，
 找供应商要现场视察，跟 AI 配合要先要方案，是同一件事在不同场合。
 
-另有一个 `interface` 层，只放"构建画像这件事"的约定（能不能问隐私、要不要给选项），
+另有一个 `interface` 层，只放"构建画像这件事"的约定（能不能问隐私、选项怎么给），
 **不进画像正文，只进 `CONTEXT.md`**。
 
 ---
@@ -149,7 +151,7 @@ python scripts/init.py
 | `scripts/build.py` | 渲染两个视图 |
 | `scripts/check.py` | 一秒体检 + 坏味道清单 |
 | `scripts/synth.py` | 综述层：写作工作台 + 引用校验 |
-| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍（用例数随功能增加，约 4 分钟） |
+| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍；分 unit（秒级）与 e2e（完整命令链）两层，全量约 1 分钟 |
 | `scripts/digest.py` `suggest.py` `tension.py` | 消化债、依据召回、矛盾工作台 |
 | `examples/minimal/` | 起步阶段的完整示例 |
 | `me/` | **你的数据**（被 gitignore，不会提交；但它自己是一个 git 仓） |
@@ -160,13 +162,18 @@ python scripts/init.py
 
 ```bash
 python scripts/check.py                 # 体检 + 坏味道
-python scripts/commit.py --due          # 今天到期待复核的（一次摆 3 条）
+python scripts/selftest.py --unit       # 秒级纯函数层（改代码先跑这个）
+python scripts/selftest.py --e2e       # 只跑必须连起来验的 12 个端到端用例
+python scripts/selftest.py              # 两层全跑，改过 scripts/ 任何一行都要全绿
 python scripts/commit.py --drafts       # 校验没过、等你决定怎么改的
-python scripts/commit.py --retire c-013 --reason "…"    # 退役（要理由）
-python scripts/commit.py --retopic c-038:work --reason "归档写错了"
-python scripts/commit.py --narrow c-013 --text "…" --context "…" --reason "原来那句说宽了"  # 标题+说明一起收窄
+python scripts/commit.py --capture said.json            # 第一步：只登记原话
+python scripts/commit.py --facts f.json --claims c.json --from-capture 51
+python scripts/commit.py --ignore s-9120 --reason "纯日常"
+python scripts/commit.py --confirm c-913 --reason "本人认这条" --by user
+python scripts/commit.py --veto    c-913 --reason "早就不是了" --by user
+python scripts/commit.py --retire c-913 --reason "…"    # 退役（要理由）
+python scripts/commit.py --narrow c-913 --text "…" --reason "原来那句说宽了"
 python scripts/commit.py --rewire x.json                # 换依据 + 换 context
-python scripts/selftest.py              # 改了 scripts/ 任何一行都要跑
 ```
 
 ---
@@ -195,8 +202,11 @@ python scripts/selftest.py              # 改了 scripts/ 任何一行都要跑
 改了就没有证据了。要更正就新增一条，旧的标 `archived` 并写原因——**过程本身是数据**。
 
 **判断会过期吗？**
-会。状态 90 天、判断 365 天。到期的意思是"该看一眼"，不是"该更新"。
-看完有四种收场：加证据、续期、推翻、退役。
+不设复核期，也没有到期队列。固定 `since + 365 天` 会把同一批建的判断挤到同一个月
+，造出一个永远还不完的队列，而"一个理由带走一批续期"
+恰好绕过逐条复核。现在 CONTEXT 每条判断带信息年龄，超过 180 天标「· 旧」，
+用到时先确认还成不成立——用到时才响，不排队、不催。
+本人点头走 `--confirm`，不认走 `--veto`，两者都留事件；判断错了走 supersedes。
 
 **一定要用 AI 吗？**
 `scripts/` 全是纯代码，你可以手写 JSON 交进去。但一轮轮问你是它的用法。
@@ -207,7 +217,7 @@ python scripts/selftest.py              # 改了 scripts/ 任何一行都要跑
 
 - ❌ 不做 SaaS，没有服务器
 - ❌ 不收集任何数据
-- ❌ 不替你下结论——判断必须你点头
+- ❌ 不替你下结论——本人点头走 `--confirm`、不认走 `--veto`；`confirmed` 不接受自报
 - ❌ 不做心理诊断，只做记录与结构
 
 ---

@@ -2,11 +2,20 @@
 """自测：把 SPEC §8 的验收变成能跑的断言。
 
 用法
-    python scripts/selftest.py          # 跑一遍，全绿返回 0
+    python scripts/selftest.py          # 两层全跑，全绿返回 0（规矩不变）
+    python scripts/selftest.py --unit   # 只跑纯函数层：秒级，改代码时先跑这个
+    python scripts/selftest.py --e2e    # 只跑端到端层
     python scripts/selftest.py --keep   # 保留临时目录，方便看哪里坏了
 
-每个 case 在**临时目录**里从零建一个仓（只拷 scripts/ 和 template/），
-用 scripts/_fixtures.py 里的**虚构数据**跑，不碰 me/，也不需要任何个人数据。
+两层：
+    unit —— 直接 import 纯函数，不起子进程、不建临时仓、不碰 me/。
+    e2e  —— 每个 case 在临时目录里从零建仓（只拷 scripts/ 和 template/），
+            用 _fixtures.py 的虚构数据跑完整条命令链。
+
+unit 直接 import 生产函数，0 子进程、约 0.1 秒出结果；
+e2e 只留 12 个必须跑完整命令链的（整批预检、视图哈希、git 提交、两阶段捕获等）。
+其余命令链用例已转成内存态单测：少起约 110 次子进程，全量目标约 1 分钟。
+代价是跨脚本串联的覆盖变薄，这是明确的取舍，不是白捡的速度。
 """
 import json
 import shutil
@@ -28,11 +37,17 @@ import _fixtures as fx  # noqa: E402
 TODAY = date.today().isoformat()
 TMP = []
 CASES = []
+UNIT = []
 CALLS = [0]
 
 
 def case(fn):
     CASES.append(fn)
+    return fn
+
+
+def unit(fn):
+    UNIT.append(fn)
     return fn
 
 
@@ -82,6 +97,329 @@ def seed(d, facts=None, claims=None):
     return out
 
 
+# ---------------------------------------------------------------- 纯函数层（秒级，不起子进程）
+
+@unit
+def unit_对账单_丢失由未认领输入算出():
+    """加一种收场动作不该再需要改减法：只要它 add 过一次，这条输入就有终态。"""
+    import contextlib
+    import io
+    from commit import Receipt
+    r = Receipt()
+    r.count_input(3)
+    r.add("✅", "f-0001", "入库")
+    r.add("🔶", "d-001", "进草稿")
+    r.add("🪄", "x-001", "一种全新的收场动作")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        lost = r.print()
+    assert r.inputs == 3 and lost == 0, (r.inputs, lost, buf.getvalue())
+
+
+@unit
+def unit_对账单_少一个终态就算丢失并点名():
+    import contextlib
+    import io
+    from commit import Receipt
+    r = Receipt()
+    r.count_input(2)
+    r.add("✅", "f-0001", "入库")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        lost = r.print()
+    assert lost == 1 and "#2" in buf.getvalue(), buf.getvalue()
+
+
+@unit
+def unit_对账单_警告不能冒充终态():
+    from commit import Receipt
+    r = Receipt()
+    r.count_input(1)
+    r.add("⚠️", "c-001", "像 80%", claim=False)
+    assert len(r.unclaimed()) == 1
+    r.add("✅", "c-001", "新增判断")
+    assert len(r.unclaimed()) == 0
+
+
+@unit
+def unit_动作表与理由表一致():
+    """加动作只改一张表：参数、理由校验、执行顺序都从它派生，不靠人记着同步。"""
+    import commit
+    names = [a["arg"] for a in commit.ARG_SPECS]
+    assert len(names) == len(set(names)), "参数表里不能有重名"
+    for arg, label in commit.REASON_ARGS.items():
+        assert arg in names, f"{arg} 要理由却没登记参数"
+        assert label, f"{arg} 没写人话标签"
+    for arg in ("retire", "narrow", "retopic", "exclude", "drop"):
+        assert arg in commit.REASON_ARGS, f"{arg} 没登记进理由表"
+    for a in commit.ACTIONS:
+        assert callable(a["handler"]), f"{a['arg']} 没有处理函数"
+        assert a["arg"] in names
+    order = [a["arg"] for a in commit.ACTIONS]
+    assert order.index("facts") < order.index("exclude") < order.index("claims"), \
+        "facts 必须在 exclude 前、claims 必须在 attach 后"
+
+
+@unit
+def unit_三处判重共用一把尺子():
+    """校验层以前裸比原文，短句会虚高；现在和写入/坏味道一样走 contain()。"""
+    from check import contain, duplicate_pairs
+    short = [{"id": "c-001", "status": "active", "text": "想歇一下"},
+             {"id": "c-002", "status": "active", "text": "想歇一会"}]
+    assert contain(short[0]["text"], short[1]["text"]) == 0.0, "不足 6 字不参与判重"
+    assert duplicate_pairs(short) == [], "短句不该被校验层报成重复"
+    long = [{"id": "c-001", "status": "active", "text": "每天凌晨四点到店里先发面再烤第一批"},
+            {"id": "c-002", "status": "active", "text": "每天凌晨四点到店里先发面再烤第二批"}]
+    assert len(duplicate_pairs(long)) == 1, "明显同义的长句该被报出来"
+
+
+@unit
+def unit_片段校验_必须真含连续八字():
+    from store import covered_by, has_fragment
+    assert has_fragment("他说每天凌晨四点到店里先发面", "每天凌晨四点到店里，先发面再烤第一批")
+    assert not has_fragment("完全不相干的一句话", "每天凌晨四点到店里，先发面再烤第一批")
+    assert covered_by("嗯", [])                    # 少于 8 字，本来就不追究
+    assert not covered_by("这句话真的完全没有落到任何一条事实上面", ["别的原话"])
+
+
+@unit
+def unit_选项编号不能当事实正文():
+    from store import is_choice_code
+    for bad in ("2B", "5D", "4 BD", "6 E", "C", "A/D", "BC"):
+        assert is_choice_code(bad), f"{bad} 应当被认成选项编号"
+    for good in ("先发面再烤第一批", "骑车去河边坐着", "C++",
+                 "翻文档", "周末去超市买了点菜"):
+        assert not is_choice_code(good), f"{good} 是正常回答，不该被拦"
+
+
+@unit
+def unit_短句不会被判成重复():
+    from check import contain
+    assert contain("干活靠手感不看表", "干活靠手感不看表") == 1.0
+    assert contain("短", "短") == 0.0            # 不足 6 字不参与判重
+    assert contain("干活靠手感不看表", "想开店但没算过账") < 0.75
+
+
+@unit
+def unit_空仓校验零错误():
+    from check import validate
+    e, _ = validate([], [], [], [], manifest=None,
+                    require_rendered=False, check_views=False, topics=[])
+    assert e == [], e
+
+
+# ---------------------------------------------------------------- 内存态单测（从命令链用例转来，0 子进程）
+# 这些以前每个都要从零建仓、跑完整条命令链；逻辑本身是纯函数，直接 import 验更快，
+# 也不用靠视图里的字符串反推「数据到底变成什么样」。
+
+
+def _mem():
+    """造一个内存里的小仓库：3 条事实 + 3 条判断，全是虚构的面包店数据。"""
+    from commit import Receipt
+    F = [dict(f, id=f"f-{i+1:04d}") for i, f in enumerate(fx.base_facts(TODAY))]
+    C = []
+    for i, c in enumerate(fx.base_claims()):
+        d = dict(c)
+        d.update(id=f"c-{i+1:03d}", status="active", basis=[f"f-{i+1:04d}"], since=TODAY)
+        C.append(d)
+    return F, C, {f["id"]: f for f in F}, Receipt()
+
+
+@unit
+def unit_事实缺asked或写编号都进草稿():
+    from commit import take_fact
+    F, _, _, rc = _mem()
+    drafts, refmap = [], []
+    base = {"date": TODAY, "kind": "自述", "topic": "work", "source": "user"}
+    take_fact(dict(base, text="这句没写当时问的是什么。"), F, rc, drafts, refmap)
+    take_fact(dict(base, text="2B", asked="今天先做什么"), F, rc, drafts, refmap)
+    assert len(F) == 3, "两条都不该进事实层"
+    assert len(drafts) == 2, drafts
+    assert {d["reason"] for d in drafts} == {"missing_asked", "choice_code"}, drafts
+
+
+@unit
+def unit_判断自报confirmed会被降级():
+    from commit import take_claim
+    F, C, fid, rc = _mem()
+    drafts, refmap, tensions = [], {}, []
+    raw = {"topic": "work", "type": "disposition", "text": "一句全新的判断",
+           "context": "他说每天凌晨四点到店里，先发面再烤第一批——这是另外一条与前面都不相同的判断，用来测试自报确认会被降级。",
+           "source": "user", "confidence": "confirmed", "basis": ["f-0001"]}
+    take_claim(dict(raw), C, fid, rc, drafts, refmap, tensions)
+    assert not drafts, drafts
+    assert len(C) == 4 and C[-1]["confidence"] != "confirmed", C[-1]
+
+
+@unit
+def unit_收窄措辞只动text且留痕():
+    from commit import narrow_claim
+    F, C, fid, rc = _mem()
+    narrows, before = [], dict(C[0])
+    rc.count_input()
+    narrow_claim("c-001", "干活靠手感", "", "原话没提表", C, fid, narrows, rc)
+    assert C[0]["text"] == "干活靠手感" and len(C) == 3
+    assert {k for k in before if C[0].get(k) != before[k]} == {"text"}
+    assert narrows[0]["old"] == before["text"] and narrows[0]["reason"] == "原话没提表"
+    assert rc.unclaimed() == []
+
+
+@unit
+def unit_收窄措辞超长与不在役会被拒():
+    from commit import narrow_claim
+    F, C, fid, rc = _mem()
+    narrows = []
+    narrow_claim("c-001", "很长" * 30, "", "太长", C, fid, narrows, rc)
+    assert C[0]["text"] == "干活靠手感，不看表" and not narrows
+    C[0]["status"] = "retired"
+    narrow_claim("c-001", "换个说法", "", "退役了", C, fid, narrows, rc)
+    assert C[0]["text"] == "干活靠手感，不看表" and not narrows
+
+
+@unit
+def unit_收窄说明必须含依据片段():
+    from commit import narrow_claim
+    F, C, fid, rc = _mem()
+    narrows = []
+    bad = "这段说明完全没有引用任何依据内容，纯粹是随便写的一句话凑够三十个字以上吧。"
+    narrow_claim("c-001", "换个说法", bad, "试一下", C, fid, narrows, rc)
+    assert C[0]["text"] == "干活靠手感，不看表" and not narrows
+    good = "他说每天凌晨四点到店里，先发面再烤第一批——把说明也一起换成带原话的版本。"
+    narrow_claim("c-001", "换个说法", good, "一起换", C, fid, narrows, rc)
+    assert C[0]["text"] == "换个说法" and C[0]["context"] == good
+
+
+@unit
+def unit_退役与放回_理由与状态():
+    from commit import retire_claim, unretire_claim
+    F, C, fid, rc = _mem()
+    retire_claim("c-001", "这条不用了", C, [], rc, fid)
+    assert C[0]["status"] == "retired" and C[0]["retired_reason"] == "这条不用了"
+    unretire_claim("c-001", C, rc)
+    assert C[0]["status"] == "active" and "retired_reason" not in C[0]
+
+
+@unit
+def unit_批量退役不波及没点名的():
+    from commit import retire_claim
+    F, C, fid, rc = _mem()
+    for cid in ("c-001", "c-002"):
+        rc.count_input()
+        retire_claim(cid, "这两条都不认了", C, [], rc, fid)
+    assert [c["status"] for c in C] == ["retired", "retired", "active"]
+    assert all(c["retired_reason"] == "这两条都不认了" for c in C[:2])
+
+
+@unit
+def unit_改归档只改topic不造版本():
+    from commit import retopic_claim
+    F, C, fid, rc = _mem()
+    before = dict(C[1])
+    retopic_claim("c-002:values", "归档错了", C, rc)
+    assert C[1]["topic"] == "values" and len(C) == 3
+    assert C[1]["status"] == "active" and not C[1].get("supersedes")
+    assert {k for k in before if C[1].get(k) != before[k]} <= {"topic", "retopied_at", "retopied_reason"}
+
+
+@unit
+def unit_换依据要连context一起换():
+    from commit import rewire_claims
+    F, C, fid, rc = _mem()
+    good = "他说想自己开一家小店，但一直没算过账——这条换成第二条依据了，说明也要跟着换。"
+    rewire_claims([{"id": "c-001", "add": ["f-0002"], "del": ["f-0001"],
+                    "context": good, "reason": "接错了"}], C, F, rc)
+    assert C[0]["basis"] == ["f-0002"] and C[0]["context"] == good
+    bad = "这段说明完全没有引用任何依据内容，纯粹是随便写的一句话凑够三十个字以上吧。"
+    rewire_claims([{"id": "c-001", "add": ["f-0003"], "del": [],
+                    "context": bad, "reason": "试一下"}], C, F, rc)
+    assert C[0]["basis"] == ["f-0002"] and C[0]["context"] == good
+
+
+@unit
+def unit_撤依据不能把判断掏空():
+    from commit import attach_basis, detach_basis
+    F, C, fid, rc = _mem()
+    attach_basis(["c-001:f-0002,f-0003"], C, F, rc)
+    detach_basis(["c-001:f-0002,f-0003"], C, F, rc)
+    assert C[0]["basis"] == ["f-0001"]
+    detach_basis(["c-001:f-0001"], C, F, rc)
+    assert C[0]["basis"] == ["f-0001"], "撤到最后一条必须拒绝"
+
+
+@unit
+def unit_迁移幂等不重复写事件():
+    from commit import migrate_legacy
+    F, C, fid, rc = _mem()
+    transcript, events, migrations = [], [], []
+    migrate_legacy(C, transcript, events, migrations, rc)
+    migrate_legacy(C, transcript, events, migrations, rc)
+    assert len(migrations) == 1 and migrations[0]["kind"] == "legacy"
+    assert len(events) == 1, "第二次不该再写一条迁移事件"
+
+
+@unit
+def unit_消化债按年龄分层():
+    from check import debt_report
+    F, C, fid, rc = _mem()
+    for days, tier in ((25, "retry"), (35, "ring")):
+        old = (date.today() - timedelta(days=days)).isoformat()
+        rows = [dict(f) for f in F] + [
+            {"id": "f-0009", "date": old, "kind": "自述", "asked": "周末怎么过",
+             "text": "周末骑车去河边坐一下午，不做计划。", "topic": "leisure", "source": "user"}]
+        d = debt_report(rows, C)
+        assert d["count"] >= 1 and d["age"] >= days - 1, d
+        assert d["tier"] == tier, (days, d["tier"])
+
+
+@unit
+def unit_原话遮敏感串但行不删():
+    from commit import redact_transcript
+    T = [{"id": "s-0001", "text": "我的邮箱是 someone@example.com，别传上去"}]
+    rc = _mem()[3]
+    redact_transcript(["s-0001"], "测试：遮掉邮箱", T, rc)
+    assert len(T) == 1 and "[邮箱已遮]" in T[0]["text"]
+    assert "someone@example.com" not in T[0]["text"]
+    assert T[0]["redact_reason"] == "测试：遮掉邮箱"
+
+
+@unit
+def unit_校验层判重也走同样算法():
+    from check import validate, duplicate_pairs
+    short = [{"id": "c-001", "status": "active", "text": "想歇一下"},
+             {"id": "c-002", "status": "active", "text": "想歇一会"}]
+    assert duplicate_pairs(short) == []
+    F = [{"id": "f-0001", "date": TODAY, "kind": "自述", "asked": "最近在忙什么",
+          "text": "每天凌晨四点到店里，先发面再烤第一批。", "topic": "work", "source": "user"}]
+    rows = [{"id": "c-001", "topic": "work", "type": "disposition",
+             "text": "每天凌晨四点到店里先发面再烤第一批", "context":
+             "他说每天凌晨四点到店里，先发面再烤第一批——每天都这个点。",
+             "source": "ai", "confidence": "inferred", "since": TODAY,
+             "basis": ["f-0001"], "status": "active"},
+            {"id": "c-002", "topic": "work", "type": "disposition",
+             "text": "每天凌晨四点到店里先发面再烤第二批", "context":
+             "他说每天凌晨四点到店里，先发面再烤第一批——第二批也差不多。",
+             "source": "ai", "confidence": "inferred", "since": TODAY,
+             "basis": ["f-0001"], "status": "active"}]
+    _, warns = validate(F, rows, [], [], require_rendered=False,
+                        check_views=False, topics=[], events=[], migrations=[],
+                        transcript=[])
+    assert any("疑似重复" in w for w in warns), warns
+
+
+@unit
+def unit_体检在百条量级不退化为平方级():
+    import time
+    from check import validate
+    rows = []
+    for i, r in enumerate(fx.bulk_claims(120)):
+        d = dict(r)
+        d.update(id=f"c-{i+1:04d}", since=TODAY, supersedes=[], status="active")
+        rows.append(d)
+    t0 = time.time()
+    validate([], rows, [], [], require_rendered=False, check_views=False, topics=[])
+    assert time.time() - t0 < 3.0, "体检明显变慢了"
+
+
 # ---------------------------------------------------------------- 承诺
 
 @case
@@ -108,17 +446,6 @@ def g1_依据悬空进草稿():
     assert "进草稿" in out, out
     assert jsonl(d, "claims.jsonl") == [], "悬空依据不该进 claims"
     assert len(jsonl(d, "drafts.jsonl")) == 1, "应该有一条草稿"
-
-
-@case
-def g1_缺_asked_进草稿():
-    d = sandbox()
-    put(d, "f.json", [{"date": TODAY, "kind": "自述", "text": "这句没写当时问的是什么。",
-                       "topic": "work", "source": "user"}])
-    code, out = run(d, "commit.py", "--facts", "f.json")
-    assert code == 0, out
-    assert "缺 asked" in out, out
-    assert jsonl(d, "facts.jsonl") == []
 
 
 @case
@@ -156,7 +483,6 @@ def g6_过软线不拦_过安全网才拦():
     for i, r in enumerate(rows):
         r["id"] = f"c-{i + 1:03d}"
         r["since"] = TODAY
-        r["review_after"] = (date.today() + timedelta(days=365)).isoformat()
         r["supersedes"] = []
         r["status"] = "active"
     (d / "me" / "claims.jsonl").write_text(
@@ -181,62 +507,17 @@ def 和已有判断几乎一样会打回草稿():
 
 
 @case
-def 坏味道会摆出来但不影响通过():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())          # 三条判断各只有一条依据
-    code, out = run(d, "check.py")
-    assert code == 0, f"坏味道不参与通过/不通过：\n{out}"
-    assert "单点依据" in out, f"三条判断各一条依据，该摆出来：\n{out}"
-    assert "只摆出来" in out, out
-
-
-@case
-def g4_过期会标出等待符():
-    d = sandbox()
-    old = days_ago(400)
-    put(d, "f.json", [{"date": old, "kind": "自述", "asked": "最近在忙什么",
-                       "text": "那时候每天凌晨四点到店里，先发面再烤第一批。",
-                       "topic": "work", "source": "user"}])
-    code, out = run(d, "commit.py", "--facts", "f.json")
-    assert code == 0, out
-    put(d, "c.json", [{"topic": "work", "type": "disposition",
-                       "text": "靠手感判断发面",
-                       "context": "他说那时候每天凌晨四点到店里，先发面再烤第一批——发到什么时候看手感。",
-                       "source": "ai", "confidence": "inferred",
-                       "since": old, "basis": ["f-0001"]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
-    assert "⏳" in p, "过期的判断应该带 ⏳"
-
-
-@case
-def g8_对账单与漏记():
+def g8_没终态的原话整批拒绝():
     d = sandbox()
     put(d, "said.json", fx.said(3, 2))
     put(d, "f.json", fx.base_facts(TODAY))
     put(d, "c.json", fx.base_claims())
     code, out = run(d, "commit.py", "--said", "said.json",
                     "--facts", "f.json", "--claims", "c.json")
-    assert code == 0, out
-    assert "0 丢失" in out, out
-    assert "你说 5 句" in out and "2 句没落地" in out, out
-    assert len(jsonl(d, "transcript.jsonl")) == 5
-
-
-@case
-def g8_剔除悬空依据不会算成负数():
-    d = sandbox()
-    seed(d, claims=[])
-    put(d, "c.json", [{"topic": "work", "type": "state",
-                       "text": "早上四点到店",
-                       "context": "他说每天凌晨四点到店里，先发面再烤第一批，所以作息一直是早班，晚上很早就睡。",
-                       "source": "ai", "confidence": "inferred",
-                       "basis": ["f-0001", "f-9999"]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    assert "0 丢失" in out, f"不该出现负数丢失：\n{out}"
-    assert "剔除了悬空依据" in out, out
+    assert code == 1, out
+    assert "没有终态" in out, out
+    assert jsonl(d, "facts.jsonl") == [], "有句子没终态时什么都不该写"
+    assert jsonl(d, "transcript.jsonl") == [], "原话也不该先落盘"
 
 
 # ---------------------------------------------------------------- 收场
@@ -256,579 +537,127 @@ def 退役_不进正文但留痕():
 
 
 @case
-def 续期_把复核期往后推():
-    d = sandbox()
-    old = days_ago(60)
-    put(d, "f.json", [{"date": old, "kind": "自述", "asked": "周末一般怎么过",
-                       "text": "周末骑车去河边坐一下午，不做计划。",
-                       "topic": "leisure", "source": "user"}])
-    code, out = run(d, "commit.py", "--facts", "f.json")
-    assert code == 0, out
-    put(d, "c.json", [{"topic": "leisure", "type": "state",
-                       "text": "周末骑车去河边，不做计划",
-                       "context": "他说周末骑车去河边坐一下午，不做计划——休息也是随手安排的。",
-                       "source": "ai", "confidence": "inferred",
-                       "since": old, "basis": ["f-0001"]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    before = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
-    code, out = run(d, "commit.py", "--renew", "c-001", "--reason", "现在还是这样")
-    assert code == 0, out
-    after = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
-    assert after["c-001"] != before["c-001"], "续期应当改变复核期"
-    assert any(c.get("renewed_reason") for c in jsonl(d, "claims.jsonl"))
-
-
-@case
-def 张力没关不能取代():
+def 日历复核已废_新判断不带复核期():
     d = sandbox()
     seed(d, claims=fx.base_claims())
-    code, out = run(d, "tension.py", "--add", "c-001", "c-002", "两条都真，但方向相反")
+    rows = jsonl(d, "claims.jsonl")
+    assert rows and all("review_after" not in c for c in rows), rows
+    code, out = run(d, "check.py")
     assert code == 0, out
-    merge = [{"topic": "work", "type": "disposition",
-              "text": "靠手感，也怕算账",
-              "context": "他说每天凌晨四点到店里，先发面再烤第一批，同时想自己开一家小店但没算过账。",
-              "source": "ai", "confidence": "inferred",
-              "basis": ["f-0001", "f-0002"],
-              "supersedes": ["c-001"], "reason": "合并成一句"}]
-    put(d, "m.json", merge)
-    code, out = run(d, "commit.py", "--claims", "m.json")
-    assert "先 tension.py --close" in out, out
-    code, out = run(d, "tension.py", "--close", "t-001", "--reason", "想过之后不冲突")
-    assert code == 0, out
-    code, out = run(d, "commit.py", "--claims", "m.json")
-    assert code == 0, out
-    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
-    assert "曾经认为" in p, p
+    assert "到期" not in out, "不该再报到期的雪崩：\n" + out
 
 
 # ---------------------------------------------------------------- 消化债
 
-@case
-def 债_25天会给出候选():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    put(d, "old.json", [{"date": days_ago(25), "kind": "自述", "asked": "最近在忙什么",
-                         "text": "那阵子也是每天凌晨四点到店里干活。",
-                         "topic": "work", "source": "user"}])
-    code, out = run(d, "commit.py", "--facts", "old.json")
-    assert code == 0, out
-    assert "最老 25 天" in out, out
-    assert "可能能挂上" in out, out
-
-
-@case
-def 债_35天会点名():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    put(d, "old.json", [{"date": days_ago(35), "kind": "自述", "asked": "最近在忙什么",
-                         "text": "上个月店里换了新的烤箱，温度不太稳。",
-                         "topic": "work", "source": "user"}])
-    code, out = run(d, "commit.py", "--facts", "old.json")
-    assert code == 0, out
-    assert "🔔" in out and "三选一" in out, out
-
-
-
-@case
-def 退役后依据会掉回债里():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    code, out = run(d, "commit.py", "--retire", "c-001", "--reason", "这条不用了")
-    assert code == 0, out
-    assert "没人用了" in out, out
-    code, out = run(d, "check.py")
-    assert "未消化 1" in out, out
-
-
-@case
-def 取代会报出被丢下的依据():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    put(d, "c.json", [{"topic": "work", "type": "disposition",
-                       "text": "靠手感，也怕算账",
-                       "context": "他说想自己开一家小店，但一直没算过账——手艺是有的，卡在算账这一步，不是不会做面包。",
-                       "source": "ai", "confidence": "inferred",
-                       "basis": ["f-0002"], "supersedes": ["c-001"],
-                       "reason": "合并成一句更准的"}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    assert "没人用了" in out, out
-    assert "f-0001" in out, out
-
-
 # ---------------------------------------------------------------- 一批收场
 
 @case
-def 批量续期只出一份对账单():
-    d = sandbox()
-    seed(d)                       # 先有事实，否则判断会因依据悬空进草稿
-    old = days_ago(150)           # 复核期已经过了 60 天，续期才看得出变化
-    put(d, "c.json", [{"topic": "work", "type": "state",
-                       "text": f"占位状态第{i}条",
-                       "context": f"他说每天凌晨四点到店里，先发面再烤第一批——第{i}条占位说明。",
-                       "source": "ai", "confidence": "inferred",
-                       "since": old, "basis": ["f-0001"]} for i in range(1, 4)])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    before = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
-    assert len(before) == 3 and all(v < TODAY for v in before.values()), before
-    code, out = run(d, "commit.py", "--renew", "c-001,c-002,c-003", "--reason", "现在还是这样")
-    assert code == 0, out
-    assert out.count("续期到") == 3, f"三条应各有一行续期：\n{out}"
-    after = {c["id"]: c.get("review_after") for c in jsonl(d, "claims.jsonl")}
-    for cid in ("c-001", "c-002", "c-003"):
-        assert after[cid] != before[cid], f"{cid} 的复核期应当往后推"
-    assert all(c.get("renewed_reason") == "现在还是这样" for c in jsonl(d, "claims.jsonl"))
-
-
-@case
-def 批量退役一个理由带走一批():
+def 事件_confirmed必须有确认事件():
     d = sandbox()
     seed(d, claims=fx.base_claims())
-    code, out = run(d, "commit.py", "--retire", "c-001,c-002", "--reason", "这两条都不认了")
+    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
+    assert all(c["confidence"] != "confirmed" for c in rows.values()), \
+        "新判断不许自报 confirmed"
+    code, out = run(d, "commit.py", "--confirm", "c-001",
+                    "--reason", "本人看过，认这条", "--by", "user")
     assert code == 0, out
     rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
-    assert rows["c-001"]["status"] == "retired" and rows["c-002"]["status"] == "retired", rows
-    assert rows["c-003"]["status"] == "active", "没点名的不该被动"
-    assert rows["c-001"]["retired_reason"] == "这两条都不认了"
-
-
-@case
-def 到期只摆N条剩下排队():
-    d = sandbox()
-    seed(d)                      # 先有事实，否则依据悬空会全进草稿
-    old = days_ago(150)          # state +90 天 → 逾期 60 天
-    put(d, "c.json", [{"topic": "work", "type": "state",
-                       "text": f"占位状态第{i}条",
-                       "context": f"他说每天凌晨四点到店里，先发面再烤第一批——第{i}条占位说明。",
-                       "source": "ai", "confidence": "inferred",
-                       "since": old, "basis": ["f-0001"]} for i in range(1, 5)]
-                 + [{"topic": "identity", "type": "constant",
-                     "text": "占位常量：虚构生日",
-                     "context": "他说每天凌晨四点到店里，先发面再烤第一批——这条只是背景。",
-                     "source": "ai", "confidence": "inferred", "basis": ["f-0001"]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    code, out = run(d, "commit.py", "--due", "2")
-    assert code == 0, out
-    assert "constant" not in out, f"常量没有复核期，不该出现在到期里：\n{out}"
-    assert "今天先看 2 条" in out, out
-    assert "剩下 2 条排着" in out, f"该说清还有多少没轮到：\n{out}"
-    assert out.count("逾期 60 天") == 2, out
-    assert "--renew c-001,c-002" in out, f"该教批量写法：\n{out}"
-    code, out = run(d, "commit.py", "--due")
-    assert "今天先看 3 条" in out and "剩下 1 条排着" in out, f"默认摆 3 条：\n{out}"
-
-
-@case
-def 债攒多了不会闭嘴():
-    d = sandbox()
-    seed(d)                      # 3 条事实，没有判断
-    old = days_ago(35)
-    put(d, "more.json", [{"date": old, "kind": "自述", "asked": "最近在忙什么",
-                          "text": f"虚构第 {i} 条：店里那台旧烤箱又响了一声。",
-                          "topic": "work", "source": "user"} for i in range(30)])
-    code, out = run(d, "commit.py", "--facts", "more.json")
-    assert code == 0, out
+    assert rows["c-001"]["confidence"] == "confirmed", rows
+    ev = jsonl(d, "events.jsonl")
+    assert any(e["kind"] == "confirm" and e["target"] == "c-001" for e in ev), ev
     code, out = run(d, "check.py")
-    assert "攒得有点多" in out, f"33 条债该说一句：\n{out}"
-    assert "三选一" in out, f"最老那条该点名：\n{out}"
+    assert code == 0, out
+
+
+@case
+def 事件_capture禁ignored_没终态整批拒绝():
+    d = sandbox()
+    put(d, "bad.json", [{"text": "这句想顺手标掉", "ignored": "懒得记"}])
+    code, out = run(d, "commit.py", "--capture", "bad.json")
+    assert code == 1 and "只收纯文本原话" in out, out
+    put(d, "said.json", ["每天凌晨四点到店里，先发面再烤第一批。",
+                         "想自己开一家小店，但一直没算过账。"])
+    code, out = run(d, "commit.py", "--capture", "said.json")
+    assert code == 0 and "s-0001" in out, out
+    put(d, "f.json", [{"date": TODAY, "kind": "自述", "asked": "最近在忙什么",
+                       "text": "每天凌晨四点到店里，先发面再烤第一批。",
+                       "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json", "--from-capture", "1")
+    assert code == 1 and "没有终态" in out, out
+    assert jsonl(d, "facts.jsonl") == [], "有一句没落地就不该写"
+    code, out = run(d, "commit.py", "--ignore", "s-0002", "--reason", "这句暂时不记")
+    assert code == 0, out
+    code, out = run(d, "commit.py", "--facts", "f.json", "--from-capture", "1")
+    assert code == 0, out
+    assert len(jsonl(d, "facts.jsonl")) == 1
 
 
 # ---------------------------------------------------------------- 归档
 
-@case
-def 改归档只动一个字段不制造版本噪音():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    before = jsonl(d, "claims.jsonl")
-    code, out = run(d, "commit.py", "--retopic", "c-002:values",
-                    "--reason", "这是一句价值判断，不该放在目标里")
-    assert code == 0, out
-    assert "goals → values" in out, out
-    assert "1 改归档" in out, f"改归档要进对账单的计数，不能算成丢失：\n{out}"
-    assert "1 丢失" not in out, out
-    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
-    assert rows["c-002"]["topic"] == "values", rows["c-002"]
-    assert rows["c-002"]["status"] == "active", "改归档不该让判断退出在役"
-    assert rows["c-002"]["retopied_reason"] == "这是一句价值判断，不该放在目标里"
-    assert len(rows) == len(before), f"改归档不该新增判断：{len(before)} → {len(rows)}"
-    assert not any(c.get("supersedes") for c in rows.values()), "不该出现取代关系"
-    # 画像要跟着搬
-    run(d, "build.py")
-    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
-    assert "想开店，但没算过账" in p, "搬完还在画像里"
-
-
-@case
-def 改归档必须写理由():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    code, out = run(d, "commit.py", "--retopic", "c-002:values")
-    assert code != 0, "没写理由应当拒绝"
-    assert "必须带 --reason" in out, out
-
-
-@case
-def 依据全来自干活现场会问一句():
-    d = sandbox()
-    seed(d)                                   # 先有基准事实
-    put(d, "f2.json", [{"ref": "x", "date": TODAY, "kind": "行为",
-                        "asked": "我提了三种做法让他挑",
-                        "text": "你别给我选项，直接说你推荐哪个。",
-                        "topic": "work", "source": "user"}])
-    code, out = run(d, "commit.py", "--facts", "f2.json")
-    assert code == 0, out
-    fid = [f for f in jsonl(d, "facts.jsonl") if f["text"].startswith("你别给我选项")][0]["id"]
-    # 同一条依据，落在 work 里不该问（工作场合的行为撑得起工作判断）
-    put(d, "c1.json", [{"topic": "work", "type": "disposition",
-                        "text": "要他表态，不要一堆选项",
-                        "context": "他说你别给我选项，直接说你推荐哪个——选项摆出来还不够，还要有人给个倾向。",
-                        "source": "ai", "confidence": "inferred", "basis": [fid]}])
-    code, out = run(d, "commit.py", "--claims", "c1.json")
-    assert code == 0, out
-    assert "1 进草稿" not in out, f"这条本身该合格：\n{out}"
-    assert "写高了" not in out, f"work 不该触发这条提示：\n{out}"
-    # 同一句话硬提到 values，就该问一句
-    put(d, "c2.json", [{"topic": "values", "type": "disposition",
-                        "text": "要人承担判断，不接受推回来",
-                        "context": "他说你别给我选项，直接说你推荐哪个——从这里推到他要人承担判断，跳了一步。",
-                        "source": "ai", "confidence": "inferred", "basis": [fid]}])
-    code, out = run(d, "commit.py", "--claims", "c2.json")
-    assert code == 0, out
-    assert "1 进草稿" not in out, f"这条本身该合格：\n{out}"
-    assert "写高了" in out, f"依据全来自干活现场却落在 values，应当问一句：\n{out}"
-    assert "还有别的场合" in out, out
-
-
 # ---------------------------------------------------------------- 域
 
-@case
-def 采集约定进CONTEXT不进画像():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    put(d, "c.json", [{"topic": "interface", "type": "disposition",
-                       "text": "别问家里的事",
-                       "context": "他说每天凌晨四点到店里，先发面再烤第一批——家里的事不想聊。",
-                       "source": "ai", "confidence": "inferred", "basis": ["f-0001"]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    portrait = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
-    context = (d / "me" / "CONTEXT.md").read_text(encoding="utf-8")
-    assert "别问家里的事" not in portrait, "interface 不该进画像正文"
-    assert "别问家里的事" in context, "interface 必须进 CONTEXT，否则下次接着建的人不知道"
-    # 也不能算进完整度
-    assert "不计入完整度" in portrait, portrait[:400]
-
-
-@case
-def 新域自动进完整度分母():
-    d = sandbox()
-    code, out = run(d, "build.py")
-    assert code == 0, out
-    p = (d / "me" / "PORTRAIT.md").read_text(encoding="utf-8")
-    assert "覆盖 0/9" in p, f"分母应当跟着 DOMAINS 走，不该写死：\n{p[:300]}"
-
-
-@case
-def 撤依据不能把判断掏空():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())      # c-001 原本只有 f-0001 一条依据
-    code, out = run(d, "commit.py", "--attach", "c-001:f-0002,f-0003")
-    assert code == 0, out
-    code, out = run(d, "commit.py", "--detach", "c-001:f-0002,f-0003")
-    assert code == 0, out
-    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
-    assert rows["c-001"]["basis"] == ["f-0001"], rows["c-001"]["basis"]
-    assert "撤依据" in out, out
-    # 撤掉最后一条：不是接错线，是这条判断没证据了 —— 必须拒绝
-    code, out = run(d, "commit.py", "--detach", "c-001:f-0001")
-    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
-    assert rows["c-001"]["basis"] == ["f-0001"], f"撤空被拒后依据不该动：{rows['c-001']['basis']}"
-    assert "一条依据都不剩" in out, out
-
-
-@case
-def 换依据要连context一起换():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    put(d, "r.json", [{"id": "c-001", "add": ["f-0002"], "del": ["f-0001"],
-                       "context": "他说想自己开一家小店，但一直没算过账——所以先看钱，不看手感。",
-                       "reason": "原来的依据接错了"}])
-    code, out = run(d, "commit.py", "--rewire", "r.json")
-    assert code == 0, out
-    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
-    assert rows["c-001"]["basis"] == ["f-0002"], rows["c-001"]["basis"]
-    assert rows["c-001"]["rewired_reason"] == "原来的依据接错了"
-    assert "换依据" in out, out
-
-
-@case
-def 换依据时context必须引用新依据():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    bad = "这句话跟两条依据都没关系，纯粹是一段用来测试校验的说明文字。"
-    put(d, "r.json", [{"id": "c-001", "add": ["f-0002"], "del": [], "context": bad, "reason": "测"}])
-    code, out = run(d, "commit.py", "--rewire", "r.json")
-    rows = {c["id"]: c for c in jsonl(d, "claims.jsonl")}
-    assert code == 0, out
-    assert rows["c-001"]["context"] != bad, "不合格的 context 不该被写进去"
-    assert "没引用任何新依据的原话" in out, out
-
-
-@case
-def 观察也要写asked():
-    d = sandbox()
-    seed(d)
-    put(d, "f2.json", [{"ref": "x", "date": TODAY, "kind": "AI观察",
-                        "text": "他当天交出了一页纸。", "topic": "work", "source": "ai"}])
-    code, out = run(d, "commit.py", "--facts", "f2.json")
-    assert code == 0, out
-    assert "1 进草稿" in out, f"没写 asked 的观察该进草稿：\n{out}"
-    assert not [f for f in jsonl(d, "facts.jsonl") if f.get("kind") == "AI观察"], \
-        "不该有任何 AI观察 落库"
-
-
-@case
-def 依据全是我观察到的会报一句():
-    d = sandbox()
-    seed(d)
-    put(d, "f2.json", [{"ref": "o", "date": TODAY, "kind": "AI观察",
-                        "asked": "我在看他做的东西", "text": "他当天交出了一页纸。",
-                        "topic": "work", "source": "ai"}])
-    code, out = run(d, "commit.py", "--facts", "f2.json")
-    assert code == 0, out
-    fid = [f for f in jsonl(d, "facts.jsonl") if f.get("kind") == "AI观察"][0]["id"]
-    put(d, "c.json", [{"topic": "work", "type": "disposition",
-                       "text": "他做事要一页纸那么大",
-                       "context": "他当天交出了一页纸，从背景、难点、设计一直写到复盘——尺寸决定他动不动手。",
-                       "source": "ai", "confidence": "inferred", "basis": [fid]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    code, out = run(d, "check.py")
-    assert "没有一句他自己的话" in out, f"只有观察当依据，该报一句：\n{out}"
-    # 退役之后就不该再唠叨：它已经不是一条在役判断了
-    code, out = run(d, "commit.py", "--retire", "c-001", "--reason", "只有观察撑着")
-    assert code == 0, out
-    code, out = run(d, "check.py")
-    assert "没有一句他自己的话" not in out, f"退役的判断不该再报：\n{out}"
-
-
-@case
-def 观察配上原话就不再报():
-    d = sandbox()
-    seed(d)
-    put(d, "f2.json", [{"ref": "o", "date": TODAY, "kind": "AI观察",
-                        "asked": "我在看他做的东西", "text": "他当天交出了一页纸。",
-                        "topic": "work", "source": "ai"}])
-    code, out = run(d, "commit.py", "--facts", "f2.json")
-    assert code == 0, out
-    fid = [f for f in jsonl(d, "facts.jsonl") if f.get("kind") == "AI观察"][0]["id"]
-    put(d, "c.json", [{"topic": "work", "type": "disposition",
-                       "text": "他做事要一页纸那么大",
-                       "context": "他当天交出了一页纸，还说先发面再烤第一批——尺寸决定他动不动手。",
-                       "source": "ai", "confidence": "inferred", "basis": [fid, "f-0001"]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    code, out = run(d, "check.py")
-    assert "没有一句他自己的话" not in out, f"有他的原话就不该报：\n{out}"
-
-
-@case
-def 硬规则从判断渲染不存副本():
-    d = sandbox()
-    seed(d, claims=fx.base_claims())
-    put(d, "c.json", [{"topic": "interface", "type": "disposition",
-                       "text": "先给结论再给理由",
-                       "context": "他说每天凌晨四点到店里，先发面再烤第一批——连回答问题也一样，先说结论。",
-                       "source": "user", "confidence": "confirmed", "basis": ["f-0001"]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    ctx = (d / "me" / "CONTEXT.md").read_text(encoding="utf-8")
-    assert "## 硬规则" in ctx, ctx[:300]
-    assert "- 先给结论再给理由" in ctx, f"interface 判断必须出现在硬规则里：\n{ctx[:600]}"
-    # 退役之后，硬规则里也要跟着消失 —— 这是"不存副本"的意义
-    cid = [c["id"] for c in jsonl(d, "claims.jsonl") if c["text"] == "先给结论再给理由"][0]
-    code, out = run(d, "commit.py", "--retire", cid, "--reason", "不成立了")
-    assert code == 0, out
-    ctx = (d / "me" / "CONTEXT.md").read_text(encoding="utf-8")
-    assert "- 先给结论再给理由" not in ctx, f"退役后硬规则不该还在下指令：\n{ctx[:600]}"
-
-
-@case
-def methods算干活现场不算写高():
-    """methods 就是"做事方式"，干活现场的观察撑得起它——不该报"写高了"。"""
-    d = sandbox()
-    seed(d)
-    put(d, "f2.json", [{"ref": "x", "date": TODAY, "kind": "行为",
-                        "asked": "我在给他演示流程",
-                        "text": "你先别做，让我看看这一步是怎么走的。",
-                        "topic": "methods", "source": "user"}])
-    code, out = run(d, "commit.py", "--facts", "f2.json")
-    assert code == 0, out
-    fid = [f for f in jsonl(d, "facts.jsonl") if f["text"].startswith("你先别做")][0]["id"]
-    put(d, "c.json", [{"topic": "methods", "type": "disposition",
-                       "text": "先看流程再动手",
-                       "context": "他说你先别做，让我看看这一步是怎么走的——动手之前先把路看清楚。",
-                       "source": "ai", "confidence": "inferred", "basis": [fid]}])
-    code, out = run(d, "commit.py", "--claims", "c.json")
-    assert code == 0, out
-    assert "写高了" not in out, f"methods 不该触发这条：\n{out}"
-    # 但同样的依据落到 values，就该报
-    put(d, "c2.json", [{"topic": "values", "type": "disposition",
-                        "text": "他做事之前一定要先想明白",
-                        "context": "他说你先别做，让我看看这一步是怎么走的——所以他是个谨慎的人。",
-                        "source": "ai", "confidence": "inferred", "basis": [fid]}])
-    code, out = run(d, "commit.py", "--claims", "c2.json")
-    assert code == 0, out
-    assert "写高了" in out, f"同样的证据落到 values 要报：\n{out}"
-
-
-@case
-def 原话里的邮箱能遮掉且行不丢():
-    d = sandbox()
-    seed(d)
-    put(d, "s.json", [{"text": "我的邮箱是 someone@example.com，别传上去"}])
-    code, out = run(d, "commit.py", "--said", "s.json")
-    assert code == 0, out
-    sid = jsonl(d, "transcript.jsonl")[0]["id"]
-    # 先确认 check 会报
-    code, out = run(d, "check.py")
-    assert "里有邮箱" in out, f"有邮箱该报：\n{out}"
-    # 遮掉
-    code, out = run(d, "commit.py", "--redact", sid, "--reason", "测试：遮掉邮箱")
-    assert code == 0, out
-    assert "遮住 1 处" in out, out
-    rows = jsonl(d, "transcript.jsonl")
-    assert len(rows) == 1, "行不能被删——删了就没法证明这句话处理过"
-    assert "someone@example.com" not in rows[0]["text"], rows[0]["text"]
-    assert "邮箱已遮" in rows[0]["text"], rows[0]["text"]
-    assert rows[0]["redact_reason"] == "测试：遮掉邮箱"
-    code, out = run(d, "check.py")
-    assert "里有邮箱" not in out, f"遮完就不该再报：\n{out}"
-
-
 # ---------------------------------------------------------------- 性能
-
-@case
-def g7_120条不会退化成分钟级():
-    d = sandbox()
-    put(d, "f.json", fx.base_facts(TODAY)[:1])
-    code, out = run(d, "commit.py", "--facts", "f.json")
-    assert code == 0, out
-    # 性能测试要超过 60 条，只能绕过闸门直接写盘（这里测的是 check 的速度，不是上限）
-    rows = fx.bulk_claims(120)
-    for i, r in enumerate(rows):
-        r["id"] = f"c-{i + 1:03d}"
-        r["since"] = TODAY
-        r["review_after"] = (date.today() + timedelta(days=365)).isoformat()
-        r["supersedes"] = []
-        r["status"] = "active"
-    (d / "me" / "claims.jsonl").write_text(
-        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
-        encoding="utf-8")
-    run(d, "build.py")
-    t0 = time.time()
-    run(d, "check.py")
-    cost = time.time() - t0
-    # 这个数含了解释器启动（Windows 上 0.3–0.6s），所以它不是基准测试。
-    # 3 秒只抓一件事：check 别退化成"每条判断扫一遍全部事实"那种平方级实现。
-    assert cost < 3.0, f"check 用了 {cost:.2f}s，怀疑退化成了平方级"
-
 
 # ---------------------------------------------------------------- 措辞修正
 
 @case
-def 收窄措辞只动text_不造新记录():
+def 事实_选项编号会被挡进草稿():
     d = sandbox()
-    seed(d, claims=fx.base_claims()[:1])
-    before = jsonl(d, "claims.jsonl")[0]
-    code, out = run(d, "commit.py", "--narrow", "c-001",
-                    "--text", "干活靠手感，不看钟表",
-                    "--reason", "原话只说了看手感，没提表")
+    put(d, "f.json", [{"date": TODAY, "kind": "自述",
+                       "asked": "上周店里最忙那天先做哪件事", "text": "2B",
+                       "topic": "work", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json")
     assert code == 0, out
-    assert "0 丢失" in out and "1 收窄措辞" in out, out
-    after = jsonl(d, "claims.jsonl")[0]
-    changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
-    assert changed == ["text"], f"只该改 text，却动了 {changed}"
-    assert len(jsonl(d, "claims.jsonl")) == 1, "不该造出新判断"
-    ns = jsonl(d, "narrows.jsonl")
-    assert len(ns) == 1, ns
-    assert ns[0]["old"] == before["text"] and ns[0]["new"] == after["text"], ns
-    assert ns[0]["reason"] == "原话只说了看手感，没提表", ns
-    rev = (d / "me" / "REVISIONS.md").read_text(encoding="utf-8")
-    assert "措辞修正" in rev and before["text"] in rev, rev
-    code2, out2 = run(d, "check.py")
-    assert code2 == 0 and "本体检只验账目" in out2, out2
+    assert "进草稿" in out and "选项编号" in out, out
+    assert jsonl(d, "facts.jsonl") == [], "编号不该入库"
+    assert len(jsonl(d, "drafts.jsonl")) == 1
 
 
 @case
-def 收窄措辞_理由必填_超长不许_退役的不收():
+def 两阶段_对账单会打正面凭据():
     d = sandbox()
-    seed(d, claims=fx.base_claims()[:1])
-    code, out = run(d, "commit.py", "--narrow", "c-001", "--text", "再改一次")
-    assert code == 1 and "--reason" in out, out
-    code, out = run(d, "commit.py", "--narrow", "c-001",
-                    "--text", "很" * 50, "--reason", "太长")
-    assert "超 40 字" in out, out
-    assert jsonl(d, "claims.jsonl")[0]["text"] == "干活靠手感，不看表"
-    code, out = run(d, "commit.py", "--narrow", "c-999",
-                    "--text", "随便", "--reason", "试试")
-    assert "找不到这条判断" in out, out
-    code, out = run(d, "commit.py", "--retire", "c-001", "--reason", "不用了")
+    put(d, "said.json", ["先发面再烤第一批", "骑车去河边坐着不做计划"])
+    code, out = run(d, "commit.py", "--capture", "said.json")
     assert code == 0, out
-    code, out = run(d, "commit.py", "--narrow", "c-001",
-                    "--text", "换个说法", "--reason", "试试")
-    assert "不是在役判断" in out, out
-
-
-@case
-def 收窄措辞可连说明一起换_不合格说明被拦():
-    d = sandbox()
-    seed(d, claims=fx.base_claims()[:1])
-    before = jsonl(d, "claims.jsonl")[0]
-    new_ctx = ("他说每天凌晨四点到店里，先发面再烤第一批——"
-               "判断发到什么时候看手感，不看钟表时间，也不提前列计划。")
-    code, out = run(d, "commit.py", "--narrow", "c-001",
-                    "--text", "干活靠手感，不看钟表", "--context", new_ctx,
-                    "--reason", "原话没提表，也没说计划")
+    put(d, "f.json", [
+        {"date": TODAY, "kind": "自述", "asked": "上周店里最忙那天先做哪件事",
+         "text": "先发面再烤第一批", "topic": "work", "source": "user"},
+        {"date": TODAY, "kind": "自述", "asked": "空下来的一下午怎么过",
+         "text": "骑车去河边坐着不做计划", "topic": "leisure", "source": "user"}])
+    code, out = run(d, "commit.py", "--facts", "f.json", "--from-capture", "1")
     assert code == 0, out
-    after = jsonl(d, "claims.jsonl")[0]
-    changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
-    assert set(changed) == {"text", "context"}, f"只该动 text/context：{changed}"
-    assert after["context"] == new_ctx, after
-    ns = jsonl(d, "narrows.jsonl")
-    assert ns[0]["old_context"] == before["context"], ns
-    assert ns[0]["new_context"] == new_ctx, ns
-    rev = (d / "me" / "REVISIONS.md").read_text(encoding="utf-8")
-    assert "原说明" in rev and "新说明" in rev, rev
-    bad_ctx = ("这段文字跟原话毫无关系，纯粹是编出来的，用来测试校验会不会把它拦下来，"
-               "不含任何依据里的连续片段。")
-    code, out = run(d, "commit.py", "--narrow", "c-001",
-                    "--text", "再改一次", "--context", bad_ctx, "--reason", "试试")
-    assert "没含依据原话片段" in out, out
-    assert jsonl(d, "claims.jsonl")[0]["text"] == "干活靠手感，不看钟表", "被拦时 text 不该变"
+    assert "你说 2 句" in out and "2 句落地" in out, out
+    assert "本轮没交 --said" not in out, f"两阶段不该报假警报：\n{out}"
 
 
 def main():
     keep = "--keep" in sys.argv
+    only_unit = "--unit" in sys.argv
+    only_e2e = "--e2e" in sys.argv
+    groups = []
+    if not only_e2e:
+        groups.append(("unit", UNIT))
+    if not only_unit:
+        groups.append(("e2e", CASES))
     started = time.time()
     ok, bad = 0, []
-    for fn in CASES:
-        name = fn.__name__
-        t0 = time.time()
-        try:
-            fn()
-            print(f"✅ {name}  ({time.time() - t0:.1f}s)")
-            ok += 1
-        except AssertionError as e:
-            print(f"❌ {name}  ({time.time() - t0:.1f}s)\n   {e}")
-            bad.append(name)
-        except Exception as e:                     # noqa: BLE001
-            print(f"💥 {name}  ({time.time() - t0:.1f}s)\n   {type(e).__name__}: {e}")
-            bad.append(name)
-    print(f"\n{ok} / {len(CASES)} 通过 ｜ 总耗时 {time.time() - started:.1f}s"
+    for label, cases in groups:
+        print(f"\n── {label}（{len(cases)} 例）──")
+        for fn in cases:
+            name = fn.__name__
+            t0 = time.time()
+            try:
+                fn()
+                print(f"✅ {name}  ({time.time() - t0:.2f}s)")
+                ok += 1
+            except AssertionError as e:
+                print(f"❌ {name}  ({time.time() - t0:.2f}s)\n   {e}")
+                bad.append(name)
+            except Exception as e:                     # noqa: BLE001
+                print(f"💥 {name}  ({time.time() - t0:.2f}s)\n   {type(e).__name__}: {e}")
+                bad.append(name)
+    total = sum(len(c) for _, c in groups)
+    print(f"\n{ok} / {total} 通过 ｜ 总耗时 {time.time() - started:.1f}s"
           f" ｜ 起了 {CALLS[0]} 次子进程")
     if bad:
         print("失败：" + "、".join(bad))
