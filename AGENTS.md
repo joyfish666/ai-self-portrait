@@ -21,6 +21,7 @@
 | "看草稿" | `python scripts/commit.py --drafts` |
 | "这条我认" / "这条不认" | `--confirm` / `--veto`，带 `--reason`（见下） |
 | "跳过这个" / "不想聊这个" | 先问是**永远不想聊**还是**今天不想聊**，再记下来（见下） |
+| "有没有矛盾" / "扫一遍矛盾" | `tension.py --candidates` 拿候选对，逐对答「会不会往相反方向走」，只 `--add` 答「会」的 |
 
 ## 用户说"不想聊"的时候
 
@@ -374,7 +375,7 @@ python scripts/check.py          # 一圈体检
 **改过 `scripts/` 里任何一行，都要跑一遍：**
 
 ```bash
-python scripts/selftest.py       # 两层全跑（秒级 unit + 21 个 e2e），约 1 分半（给足超时）
+python scripts/selftest.py       # 两层全跑（秒级 unit + e2e），约 2 分钟（给足超时）
 python scripts/selftest.py --unit  # 只跑秒级层，改纯逻辑时先跑这个
 ```
 
@@ -387,6 +388,7 @@ python scripts/selftest.py --unit  # 只跑秒级层，改纯逻辑时先跑这�
 python scripts/digest.py 5       # 挑 5 条未消化的事实，变成 claim 或排除
 python scripts/suggest.py        # 给判断推荐候选依据（算法召回，人确认）
 
+python scripts/tension.py --candidates   # 筛出待判的候选对（只读，不写文件）
 python scripts/tension.py --worksheet    # 按域摆出全部判断
 python scripts/tension.py --add c-929 c-926 "一句话描述"
 python scripts/tension.py --close t-901 --reason "已经决定：先按 35 万谈"
@@ -395,6 +397,8 @@ python scripts/tension.py --check
 
 **矛盾定义**：两条都真、但拉着人往相反方向走。**不是"两条冲突"——冲突说明有一条错了，张力说明两条都对。**
 **`tensions` 长期为空，通常说明没扫，不是没矛盾。**
+扫的时候先跑 `--candidates` 拿候选对（同域、都是判断类、没登记过、不是重复），
+再逐对回答「会不会往相反方向走」。**它只筛范围，判不判是你的事**——别把候选当结论。
 
 ## 消化债（有保质期，不是 1:1）
 

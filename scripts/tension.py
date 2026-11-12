@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from itertools import combinations
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -25,6 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 ME = ROOT / "me"
 sys.path.insert(0, str(ROOT / "scripts"))
+import check as check_mod  # noqa: E402
 from store import load  # noqa: E402
 
 DOMAINS = ["identity", "work", "methods", "goals", "values", "emotion",
@@ -33,6 +35,45 @@ NAME = {"identity": "身份", "work": "职业", "methods": "方法", "goals": "�
         "values": "价值", "emotion": "情绪", "health": "身体",
         "relations": "关系", "leisure": "兴趣"}
 JUDGED = ("disposition", "inference")
+
+
+def cut(t, n=22):
+    t = " ".join(str(t).split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def candidates(claims, tensions, domain=None):
+    """只筛范围，不下判断：同域 + 都是判断类 + 没登记过 + 不是重复。
+
+    为什么是这两个条件（不是"全部两两比"）：
+    - 跨域两条很少真冲突：工作上看重稳定 vs 周末爱冒险，是两个场合的取舍，
+      报出来也没法处理（你删不掉其中一条）。
+    - type 不同比不出冲突：constant 是背景（几岁、在哪）、state 是当下情况
+      （最近在带新人）、disposition/inference 是倾向。前两者跟后者是描述关系，
+      不是互相抵消。「每天在开会」和「最怕给别人做东西」不是打架，是解释。
+
+    剩下的才交给 LLM 逐对判「会不会往相反方向走」——这一步代码不做。
+    """
+    done = {frozenset(t.get("between") or []) for t in tensions}
+    live = [c for c in claims
+            if c.get("status") == "active"
+            and c.get("type") in ("disposition", "inference")
+            and (domain is None or c.get("topic") == domain)]
+    groups = {}
+    for c in live:
+        groups.setdefault(c.get("topic"), []).append(c)
+
+    out = []
+    for topic in sorted(groups):
+        group = sorted(groups[topic], key=lambda x: x.get("id", ""))
+        for a, b in combinations(group, 2):
+            if frozenset((a.get("id"), b.get("id"))) in done:
+                continue
+            # 字面几乎一样的是"重复"，那是 check 的坏味道，不是张力
+            if check_mod.contain(a.get("text", ""), b.get("text", "")) >= 0.9:
+                continue
+            out.append((a, b))
+    return out
 
 
 COMMIT = Path(__file__).resolve().parent / "commit.py"
@@ -125,6 +166,29 @@ def main() -> int:
             return call_commit("--tensions", path)
         finally:
             Path(path).unlink(missing_ok=True)
+
+    if "--candidates" in args:
+        i = args.index("--candidates")
+        dom = args[i + 1] if (len(args) > i + 1 and not args[i + 1].startswith("-")) else None
+        pairs = candidates(claims, tensions, dom)
+        if not pairs:
+            print("✅ 没有待判的候选对（同域判断都登记过了，或全被判过）")
+            return 0
+        per = {}
+        for a, b in pairs:
+            per[a.get("topic")] = per.get(a.get("topic"), 0) + 1
+        print(f"候选 {len(pairs)} 对 —— 同域、都是判断类、没登记过、也不是重复\n")
+        cur = None
+        for a, b in pairs:
+            if a.get("topic") != cur:
+                cur = a.get("topic")
+                print(f"## {NAME.get(cur, cur)}（{per[cur]} 对）")
+            print(f"  {a['id']} × {b['id']}  {cut(a['text'])} ｜ {cut(b['text'])}")
+        print("\n逐对回答一个问题：**这两条会不会让人往相反方向走？**")
+        print('答「会」的：python scripts/tension.py --add c-xxx c-yyy "描述"')
+        print("只看一个域：python scripts/tension.py --candidates methods")
+        print("这一步只筛范围、不写任何文件；判不判、判给谁，都还是你的事。")
+        return 0
 
     if "--worksheet" in args or not args:
         print("按域摆出全部判断。逐对问：**这两条会不会拉着人往相反方向走？**\n")

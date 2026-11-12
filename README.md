@@ -155,8 +155,8 @@ python scripts/init.py
 | `scripts/build.py` | 渲染两个视图 |
 | `scripts/check.py` | 一秒体检 + 坏味道清单 |
 | `scripts/synth.py` | 综述层：写作工作台 + 引用校验 |
-| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍；分 unit（秒级）与 e2e（完整命令链）两层，全量约 1 分半 |
-| `scripts/digest.py` `suggest.py` `tension.py` | 消化债、依据召回、矛盾工作台 |
+| `scripts/selftest.py` | 自测：用**虚构数据**把八条承诺逐条验一遍；分 unit（秒级）与 e2e（完整命令链）两层，全量约 2 分钟 |
+| `scripts/digest.py` `suggest.py` `tension.py` | 消化债、依据召回、矛盾候选筛选与工作台 |
 | `examples/minimal/` | 起步阶段的完整示例 |
 | `me/` | **你的数据**（被 gitignore，不会提交；但它自己是一个 git 仓） |
 
@@ -167,7 +167,7 @@ python scripts/init.py
 ```bash
 python scripts/check.py                 # 体检 + 坏味道
 python scripts/selftest.py --unit       # 秒级纯函数层（改代码先跑这个）
-python scripts/selftest.py --e2e       # 只跑必须连起来验的 15 个端到端用例
+python scripts/selftest.py --e2e       # 只跑必须连起来验的端到端用例
 python scripts/selftest.py              # 两层全跑，改过 scripts/ 任何一行都要全绿
 python scripts/commit.py --drafts       # 校验没过、等你决定怎么改的
 python scripts/commit.py --capture said.json            # 第一步：只登记原话

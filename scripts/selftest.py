@@ -12,10 +12,10 @@
     e2e  —— 每个 case 在临时目录里从零建仓（只拷 scripts/ 和 template/），
             用 _fixtures.py 的虚构数据跑完整条命令链。
 
-unit 直接 import 生产函数，0 子进程、约 0.7 秒出结果；
+unit 直接 import 生产函数，0 子进程、约 1 秒出结果；
 e2e 只留必须跑完整命令链的那些（整批预检、重渲染比对、git 提交、两阶段捕获、
 写盘中断回滚、示例目录能否过体检）。
-其余命令链用例已转成内存态单测：少起约 110 次子进程，全量约 1 分半。
+其余命令链用例已转成内存态单测：少起约 110 次子进程，全量约 2 分钟。
 代价是跨脚本串联的覆盖变薄，这是明确的取舍，不是白捡的速度。
 """
 import json
@@ -451,6 +451,40 @@ def unit_校验层判重也走同样算法():
 
 
 @unit
+def unit_冲突候选只筛同域判断():
+    """筛范围只做四件事：同域、都是判断类、没登记过、不是重复。"""
+    import tension
+    base = [
+        {"id": "c-001", "topic": "work", "type": "disposition",
+         "text": "干活靠手感，不看表", "status": "active"},
+        {"id": "c-002", "topic": "work", "type": "disposition",
+         "text": "该定死时间的事绝不含糊", "status": "active"},
+        {"id": "c-003", "topic": "work", "type": "state",
+         "text": "最近在带两个新人", "status": "active"},
+        {"id": "c-004", "topic": "leisure", "type": "disposition",
+         "text": "周末不做任何计划", "status": "active"},
+    ]
+    pairs = {(a["id"], b["id"]) for a, b in tension.candidates(base, [])}
+    assert pairs == {("c-001", "c-002")}, f"跨域和状态都不该进候选：{pairs}"
+
+    assert not list(tension.candidates(base, [{"between": ["c-001", "c-002"]}])), \
+        "登记过的对不该再冒出来"
+
+    retired = [dict(c) for c in base]
+    retired[0]["status"] = "retired"
+    assert not list(tension.candidates(retired, [])), "退役的判断不参与"
+
+    dup = [{"id": "c-005", "topic": "goals", "type": "disposition",
+            "text": "想开店但一直没算过账", "status": "active"},
+           {"id": "c-006", "topic": "goals", "type": "disposition",
+            "text": "想开店，但一直没算过账。", "status": "active"}]
+    assert not list(tension.candidates(dup, [])), "几乎一样的是重复，不是张力"
+
+    assert len(list(tension.candidates(base, [], "work"))) == 1, "单域过滤"
+    assert not list(tension.candidates(base, [], "leisure")), "一条判断凑不出对"
+
+
+@unit
 def unit_体检在百条量级不退化为平方级():
     import time
     from check import validate
@@ -716,6 +750,27 @@ def 两阶段_对账单会打正面凭据():
     assert code == 0, out
     assert "你说 2 句" in out and "2 句落地" in out, out
     assert "本轮没交 --said" not in out, f"两阶段不该报假警报：\n{out}"
+
+
+@case
+def 冲突候选只读不写():
+    """筛范围是只读动作：列出同域判断的两两组合，不碰任何数据文件。"""
+    d = sandbox()
+    seed(d, claims=fx.base_claims())
+    put(d, "c2.json", [{"topic": "work", "type": "disposition",
+                        "text": "该定死的时间一个都不能赶",
+                        "context": "他说每天凌晨四点到店里，先发面再烤第一批——几点进炉是有表的，一步不赶。",
+                        "source": "ai", "basis": ["f-0001"]}])
+    code, out = run(d, "commit.py", "--claims", "c2.json", "--no-git")
+    assert code == 0, out
+    before = (d / "me" / "tensions.jsonl").read_text(encoding="utf-8")
+    code, out = run(d, "tension.py", "--candidates")
+    assert code == 0, out
+    assert "候选" in out and "×" in out, out
+    assert (d / "me" / "tensions.jsonl").read_text(encoding="utf-8") == before, \
+        "候选筛选不该写盘"
+    code, out = run(d, "tension.py", "--candidates", "leisure")
+    assert code == 0 and "没有待判" in out, out
 
 
 @case
