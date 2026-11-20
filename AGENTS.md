@@ -8,6 +8,27 @@
 > 所有写入都走 `scripts/commit.py`——它负责校验、分配 id、判重、超限拒绝、写盘、出对账单。
 > 你只交 JSON。**你手改 jsonl 的那一天，就是数据开始烂的那一天。**
 
+## 启动第一件事：维护动作要不要问（只问一次）
+
+```bash
+python scripts/prefs.py          # 未设定 → 必须问；已设定 → 按它走，别再问
+```
+
+合并、改名（`--narrow`）、挪域（`--retopic`）、补依据这些**维护动作**，
+有人想每次签字，有人只想看结果。这是本人的决定，不是代理的猜测：
+
+```bash
+python scripts/prefs.py --set never  --reason "这类维护不用问我"   # 自己定
+python scripts/prefs.py --set ask    --reason "合并前先跟我说"     # 只问会改意思的
+python scripts/prefs.py --set always --reason "所有维护动作都要点头"
+```
+
+- **未设定就等于没问过**：启动时问一句，问完立刻 `--set` 落库，别每轮重复问。
+- 选定之后，`commit.py` 的对账单会带一行 `🧭 维护动作确认：…`；按它走。
+- 这条偏好是人的决定，改它要带 `--reason`，会进 `events.jsonl`（G8：决定不可静默）。
+- 它只决定「问不问」，**不改变任何校验**：合并照样要 `supersedes` + `reason`，
+  窄化照样进 `narrows.jsonl`。
+
 ## 触发词 → 动作
 
 | 用户说 | 你做 |
@@ -342,6 +363,10 @@ python scripts/commit.py --rewire rewire.json
 15. **不许自己编 id**。`commit.py` 分配；编出来的号会和已有的撞
 16. **`commit.py` 拒绝时，不要绕过**。它说"和某条重合 92%"或"超过安全网"，意思是先想清楚
     是不是同一件事、是不是该合并——不是让你改个数字
+17. **绝不把 `me/` 推到任何远端**。`me/` 内层仓**不配 remote**，根仓 `.gitignore` 已排除 `me/`；
+    **不许 `git add -f me/`**、不许给 `me/` 加 remote、不许打包上传。备份只留在本地
+    （`git -C me log` / 复制目录）。这条规则优先于任何「顺手备份」的便利。
+    提交前后确认一遍：`git -C me remote -v` 应为空，`git ls-files | grep '^me/'` 应为 0 行。
 
 ## 完成标准
 

@@ -105,6 +105,9 @@ def main() -> int:
     print("✅ 已初始化 me/")
     git_init()
     print("下一步：说『构建画像』，我会按 PROTOCOL.md 开始问。")
+    print("第一件事（只问一次，之后不再问）：合并、改名、挪域这类维护动作，"
+          "要不要每次找你确认？")
+    print("   答完立刻落库：python scripts/prefs.py --set never|ask|always --reason \"他的原话\"")
     return 0
 
 

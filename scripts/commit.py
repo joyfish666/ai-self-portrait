@@ -1334,6 +1334,12 @@ def main():
             print("   三选一：--attach 挂上去 ｜ 写一条新判断 ｜ --exclude 标废")
 
     print(f"state：第 {st['round']} 轮 · 当前域 {st['current_topic']}")
+    pref = ((st.get("prefs") or {}).get("confirm_maintenance") or {})
+    if pref.get("value") in ("never", "ask", "always"):
+        print(f"🧭 维护动作确认：{pref['value']}")
+    else:
+        print("🧭 维护动作确认偏好未设定 —— 问一次「合并/改名/挪域要不要每次问你？」，"
+              "然后 python scripts/prefs.py --set never|ask|always --reason \"…\"")
 
     if not args.no_build:
         print("")

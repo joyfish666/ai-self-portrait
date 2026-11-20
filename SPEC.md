@@ -350,6 +350,27 @@ my-portrait/
 `pending_round` 是「已经捕获、还没分拣」的那一轮：`--capture` 只登记原话，不推进
 `round`；同一轮补交原话时接着用它，不会另开一轮。分拣成功后清掉。
 
+**`prefs` 是本人的决定，不是推算出来的状态**（服务 G5 零概念负担 + G8 决定不可静默）：
+
+```json
+"prefs": {
+  "confirm_maintenance": {
+    "value": "never",              // never / ask / always
+    "by": "user", "decided_at": "2026-11-20",
+    "reason": "这类维护不用问我",
+    "ts": "2026-11-20T20:20:00+08:00"
+  }
+}
+```
+
+合并、改名（`narrow`）、挪域（`retopic`）、补依据这些**维护动作**要不要每次找本人签字，
+属于人的偏好，两种做法都合理，代理不该替他猜，也不该每轮重复问。所以：
+
+- **未设定 = 没问过**：启动时问一次，`python scripts/prefs.py --set never|ask|always --reason "…"` 落库。
+- 改它必须带 `--reason`，并写一条 `events.jsonl`（`kind=pref`）。
+- 它**只决定问不问**，不改变任何校验：合并仍要 `supersedes`+`reason`，窄化仍进 `narrows.jsonl`。
+- 每轮对账单末尾打一行 `🧭 维护动作确认：…`，代理按它走。
+
 **写盘不是跨文件事务**：`commit` 要动十个文件，顺序写。写之前把每个文件的原样存进
 `me/.pending.json`，全部写完才删。中途断电/被杀会留下这份快照，
 此时 `commit` 拒绝任何写入（重跑会顺手清掉快照，回滚的路就没了），只能二选一：
